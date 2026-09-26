@@ -23,6 +23,7 @@ import getpass
 import ipaddress
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -73,6 +74,8 @@ UDP_PORTS = "53,67,69,123,137,161,500,514,1900,5353"
 # Tighter timing for targets on a directly attached LAN, where replies take
 # milliseconds. Cuts "Find Hosts" with top-100 ports from ~5s to ~2s on a /24
 # with identical results; not used for typed/remote targets, where it could miss hosts.
+# Not used for Scan Ports either: on big port ranges it gave up on slow replies and
+# missed real open ports (full scan of a router: 2 of 3 found), for only ~15% speed.
 LAN_FAST = ["--max-rtt-timeout", "200ms", "--max-retries", "1", "--min-rate", "1000"]
 
 WEB_PORTS = [(443, "https"), (8443, "https"), (80, "http"), (8080, "http"),
@@ -317,6 +320,141 @@ def arp_macs(arp_out):
                          arp_out):
         macs[m.group(1)] = normalize_mac(m.group(2))
     return macs
+
+
+# ---- this computer's own open ports ---------------------------------------
+# A network scan only probes a list of common ports and can't see ports bound to
+# localhost, so for the machine NetScan runs on we ask the OS for its listening
+# sockets instead: complete, instant, no root, and it names the program.
+
+def _listener(proto, address, port, process="", pid=None):
+    return {"proto": proto, "address": address.strip("[]").split("%")[0], "port": int(port),
+            "process": process, "pid": pid}
+
+
+def parse_ss(out):
+    """Linux `ss -tulnpH`: 'tcp LISTEN 0 128 0.0.0.0:27036 0.0.0.0:* users:(("steam",pid=1,fd=2))'"""
+    found = []
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) < 5 or f[0] not in ("tcp", "udp") or (f[0] == "tcp" and f[1] != "LISTEN"):
+            continue
+        address, _, port = f[4].rpartition(":")
+        if port.isdigit():
+            m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', line)
+            found.append(_listener(f[0], address, port, m.group(1) if m else "",
+                                   int(m.group(2)) if m else None))
+    return found
+
+
+def parse_lsof(out):
+    """macOS `lsof -nP -iTCP -sTCP:LISTEN -iUDP -F cPn` (field output: c=command, P=proto, n=name)."""
+    found, command, proto, pid = [], "", "", None
+    for line in out.splitlines():
+        tag, value = line[:1], line[1:]
+        if tag == "p" and value.isdigit():
+            pid = int(value)
+        elif tag == "c":
+            command = value
+        elif tag == "P":
+            proto = value.lower()
+        elif tag == "n" and proto in ("tcp", "udp") and "->" not in value:
+            address, _, port = value.rpartition(":")
+            if port.isdigit():
+                found.append(_listener(proto, address, port, command, pid))
+    return found
+
+
+def parse_netstat_mac(out):
+    """macOS `netstat -an`: 'tcp4 0 0 *.27036 *.* LISTEN' / 'udp4 0 0 *.5353 *.*' (no program names)."""
+    found = []
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) < 5 or not f[0].startswith(("tcp", "udp")):
+            continue
+        if f[0].startswith("tcp") and "LISTEN" not in f:
+            continue
+        if f[0].startswith("udp") and f[4] != "*.*":
+            continue  # connected UDP socket, not a listener
+        address, _, port = f[3].rpartition(".")
+        if port.isdigit():
+            found.append(_listener(f[0][:3], address, port))
+    return found
+
+
+WIN_LISTENERS_PS = """
+$ErrorActionPreference = 'SilentlyContinue'
+$names = @{}; Get-Process | ForEach-Object { $names[$_.Id] = $_.ProcessName }
+@(Get-NetTCPConnection -State Listen | ForEach-Object {
+    @{ proto = 'tcp'; address = "$($_.LocalAddress)"; port = $_.LocalPort; pid = [int]$_.OwningProcess
+       process = $names[[int]$_.OwningProcess] } }) +
+@(Get-NetUDPEndpoint | ForEach-Object {
+    @{ proto = 'udp'; address = "$($_.LocalAddress)"; port = $_.LocalPort; pid = [int]$_.OwningProcess
+       process = $names[[int]$_.OwningProcess] } }) |
+    ConvertTo-Json -Compress
+"""
+
+
+def local_listeners():
+    """Every listening TCP socket and bound UDP socket on this machine."""
+    if IS_WIN:
+        return [_listener(l.get("proto", "tcp"), l.get("address") or "", l.get("port", 0), l.get("process") or "",
+                          l.get("pid")) for l in as_list(powershell_json(WIN_LISTENERS_PS)) if l.get("port")]
+    if IS_MAC:
+        # lsof names the program but only sees our own processes; netstat sees system services too.
+        return (parse_lsof(run_text("/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-iUDP", "-F", "cPn"))
+                + parse_netstat_mac(run_text("/usr/sbin/netstat", "-an", "-p", "tcp"))
+                + parse_netstat_mac(run_text("/usr/sbin/netstat", "-an", "-p", "udp")))
+    return parse_ss(run_text("ss", "-tulnpH"))
+
+
+def is_loopback(address):
+    return address.startswith("127.") or address in ("::1", "localhost")
+
+
+def local_open_ports(listeners):
+    """Merge raw listeners into port dicts like parse_ports(), plus 'local_only' and 'program'.
+
+    A port is local-only when every socket on it is bound to loopback, so nothing on the
+    network can reach it. A 'temporary' UDP socket is a high, unregistered port: almost always
+    an app's socket for its own outgoing traffic (DNS lookups, calls), not a service.
+    NetScan's own sockets (name lookups) are left out.
+    """
+    merged = {}
+    for l in listeners:
+        if l.get("pid") == os.getpid():
+            continue
+        m = merged.setdefault((l["proto"], l["port"]), {"programs": [], "exposed": False})
+        m["exposed"] = m["exposed"] or not is_loopback(l["address"])
+        if l["process"] and l["process"] not in m["programs"]:
+            m["programs"].append(l["process"])
+    ports = []
+    for (proto, port), m in sorted(merged.items()):
+        try:
+            known = socket.getservbyport(port, proto)
+        except (OSError, OverflowError):
+            known = ""
+        program = ", ".join(m["programs"])
+        ports.append({"port": port, "proto": proto, "service": m["programs"][0] if m["programs"] else known,
+                      "version": f"programs: {program}" if len(m["programs"]) > 1 else "", "program": program,
+                      "local_only": not m["exposed"],
+                      "temporary": proto == "udp" and port >= EPHEMERAL_START and not known})
+    # listening ports first, temporary sockets at the end
+    return sorted(ports, key=lambda p: (p["temporary"], p["proto"], p["port"]))
+
+
+EPHEMERAL_START = 32768  # start of the OS's range for temporary ports (Linux; Windows/macOS use 49152)
+
+
+def this_os_name():
+    try:
+        if IS_MAC:
+            return f"macOS {platform.mac_ver()[0]}"
+        if IS_WIN:
+            return f"Windows {platform.release()}"
+        return platform.freedesktop_os_release().get("PRETTY_NAME", "Linux")
+    except (OSError, AttributeError):
+        return platform.system()
 
 
 _VENDORS = None
@@ -747,6 +885,8 @@ RISKY_PORTS = {
 
 
 def port_risk(p):
+    if p.get("local_only") or p.get("temporary"):
+        return ""  # nothing on the network can reach it
     return RISKY_PORTS.get((p["port"], p["proto"]), "")
 
 
@@ -2001,6 +2141,10 @@ class MainWindow(QMainWindow):
             message = f"Finding hosts on {self.last_target}…"
         if self.auto_ports and net:
             args += LAN_FAST
+        if net:
+            # Scanning ourselves in the same run throws off nmap's timing for every other host
+            # (a full port scan found 1 of the router's 3 open ports); our ports come from the OS.
+            args += ["--exclude", net["local_ip"]]
         args += iface_args(net) + targets
         self.run_nmap(args, message, self.host_found, self.hosts_done)
 
@@ -2034,6 +2178,8 @@ class MainWindow(QMainWindow):
                     h["vendor"] = h["vendor"] or mac_vendor(h["mac"])
                     self.refresh_row(ip)
         if not failed:
+            self.add_this_computer()
+            self.apply_local_ports()
             # Flag devices never seen before, unless this is the first scan ever
             # (then everything would be "new").
             first_run = not self.devices.known_macs()
@@ -2043,7 +2189,7 @@ class MainWindow(QMainWindow):
                     top = {"tcp": port_set(top_tcp_ports(100)), "udp": set()}
                     for ip, h in self.hosts.items():
                         if h["mac"]:
-                            self.devices.update_ports(h["mac"], self.ports.get(ip, []), top)
+                            self.devices.update_ports(h["mac"], self.network_ports(ip), top)
             if self.current:
                 self.online_macs = {h["mac"] for h in self.hosts.values() if h["mac"]}
             for ip in self.hosts:
@@ -2072,11 +2218,12 @@ class MainWindow(QMainWindow):
         if not self.used_root:
             self.summary += " Unprivileged scan: some devices may be missed."
         if self.auto_ports:
-            total = sum(len(p) for p in self.ports.values())
+            total = sum(len(p) for ip, p in self.ports.items() if ip != self.local_ip())
             self.summary += f" {total} open port(s) in the top 100."
         elif n:
             self.summary += " Select hosts and press Scan Ports to check for services."
         self.summary += self.os_summary(self.hosts)
+        self.summary += self.this_computer_summary(self.hosts)
         self.summary += self.risk_summary(self.hosts)
         if self.new_devices:
             self.summary += f" {len(self.new_devices)} device(s) never seen before."
@@ -2131,8 +2278,14 @@ class MainWindow(QMainWindow):
                                     MUTED if h["vendor"].startswith("(") else TEXT))
         ports = self.table.item(row, COL_PORTS)
         bad = risky(self.ports.get(ip))
-        ports.setText(("⚠ " if bad else "") + summarize_ports(self.ports.get(ip)))
-        ports.setForeground(QColor(AMBER if bad else GREEN if self.ports.get(ip) else MUTED))
+        text = summarize_ports(self.ports.get(ip))
+        reachable = self.network_ports(ip)
+        if ip == self.local_ip() and ip in self.ports:  # reachable vs localhost-only
+            local_only = sum(1 for p in self.ports[ip] if p.get("local_only") and not p.get("temporary"))
+            text = (summarize_ports(reachable) if reachable else "none reachable from the network") \
+                + (f"  · +{local_only} local-only" if local_only else "")
+        ports.setText(("⚠ " if bad else "") + text)
+        ports.setForeground(QColor(AMBER if bad else GREEN if reachable else MUTED))
         ports.setToolTip("\n".join(f"{port_label(p)}: {port_risk(p)}" for p in bad))
         self.apply_filter_row(row)
 
@@ -2232,10 +2385,19 @@ class MainWindow(QMainWindow):
         args = self.port_args()
         if args is None:
             return
-        if self.profile.currentIndex() == 2 and len(ips) > 3:
+        me = self.local_ip()
+        others = [ip for ip in ips if ip != me]
+        if not others:  # only this computer: read its ports from the OS, no nmap needed
+            self.apply_local_ports()
+            self.show_port_details()
+            self.summary = ("This computer's ports come from its own list of listening sockets."
+                            + self.this_computer_summary([me]))
+            self.update_status()
+            return
+        if self.profile.currentIndex() == 2 and len(others) > 3:
             answer = QMessageBox.question(
                 self, "NetScan",
-                f"Scanning all 65535 ports on {len(ips)} hosts can take a long time. Continue?")
+                f"Scanning all 65535 ports on {len(others)} hosts can take a long time. Continue?")
             if answer != QMessageBox.Yes:
                 return
 
@@ -2252,10 +2414,8 @@ class MainWindow(QMainWindow):
         if self.version_box.isChecked():
             args.append("-sV")
         args += self.os_args()
-        if self.current:
-            args += LAN_FAST
-        args += iface_args(self.current) + ips
-        what = f"{len(ips)} host(s)" if len(ips) > 1 else ips[0]
+        args += iface_args(self.current) + others
+        what = f"{len(others)} host(s)" if len(others) > 1 else others[0]
         label = self.profile.currentText().removesuffix("…").split(" (")[0].lower()
         self.run_nmap(args, f"Scanning {label} on {what}…", self.ports_found, self.ports_done)
 
@@ -2287,17 +2447,20 @@ class MainWindow(QMainWindow):
         self.show_port_details()
         if failed:
             return
-        total = sum(len(self.ports.get(ip, [])) for ip in self.scan_ips)
+        if self.local_ip() in self.scan_ips:
+            self.apply_local_ports()
+        total = sum(len(self.ports.get(ip, [])) for ip in self.scan_ips if ip != self.local_ip())
         mode = "SYN" if self.used_root else "TCP connect"
         self.summary = (f"Port scan done in {max(self.elapsed, 1)}s ({mode}): "
                         f"{total} open port(s) on {len(self.scan_ips)} host(s).")
         self.summary += self.os_summary({ip: self.hosts[ip] for ip in self.scan_ips if ip in self.hosts})
+        self.summary += self.this_computer_summary(self.scan_ips)
         self.summary += self.risk_summary(self.scan_ips)
         with self.devices.batch():
             for ip in self.scan_ips:
                 h = self.hosts.get(ip)
                 if h and h["mac"]:
-                    self.devices.update_ports(h["mac"], self.ports.get(ip, []), self.scanned)
+                    self.devices.update_ports(h["mac"], self.network_ports(ip), self.scanned)
         for ip in self.scan_ips:
             if ip in self.hosts:
                 self.refresh_row(ip)
@@ -2305,6 +2468,50 @@ class MainWindow(QMainWindow):
             save_history(self.scan_record(), self.history_path)
         self.refresh_devices()
         self.update_status()
+
+    # ---- this computer ------------------------------------------------------
+
+    def local_ip(self):
+        return self.current["local_ip"] if self.current else None
+
+    def network_ports(self, ip):
+        """Open ports other machines can reach (drops this computer's localhost-only ones and
+        temporary sockets, which change every run)."""
+        return [p for p in self.ports.get(ip) or [] if not (p.get("local_only") or p.get("temporary"))]
+
+    def this_computer_summary(self, ips):
+        me = self.local_ip()
+        if me not in ips or me not in self.ports:
+            return ""
+        return f" This computer: {len(self.network_ports(me))} port(s) reachable from the network."
+
+    def add_this_computer(self):
+        """List this computer even if nmap didn't report it, when its IP is inside the scanned range."""
+        ip, net = self.local_ip(), self.current
+        if not ip or ip in self.hosts:
+            return
+        addr = ipaddress.ip_address(ip)
+        inside = False
+        for t in self.last_target.split():
+            try:
+                inside = inside or addr in ipaddress.ip_network(t, strict=False)
+            except ValueError:
+                pass  # ranges like 10.0.0.1-50: leave it to nmap
+        if not inside:
+            return
+        h = {"ip": ip, "hostname": socket.gethostname(), "mac": net["mac"], "vendor": "(this computer)",
+             "os": ""}
+        self.hosts[ip] = h
+        self.add_row(h)
+
+    def apply_local_ports(self):
+        """This computer's ports straight from the OS: complete, and including localhost-only ones."""
+        ip = self.local_ip()
+        if ip not in self.hosts:
+            return
+        self.ports[ip] = local_open_ports(local_listeners())
+        self.hosts[ip]["os"] = self.hosts[ip].get("os") or this_os_name()
+        self.refresh_row(ip)
 
     def risk_summary(self, ips):
         bad = {ip: risky(self.ports.get(ip)) for ip in ips}
@@ -2340,7 +2547,15 @@ class MainWindow(QMainWindow):
             self.details_label.setText(f"{who}: not port-scanned yet.")
             return
         ports = self.ports[ip]
-        self.details_label.setText(f"{who}: {len(ports)} open port(s)")
+        local = ip == self.local_ip()
+        if local:
+            reachable = len(self.network_ports(ip))
+            temporary = sum(1 for p in ports if p.get("temporary"))
+            self.details_label.setText(f"{who}: {reachable} reachable from the network, "
+                                       f"{len(ports) - reachable - temporary} local-only, {temporary} temporary "
+                                       "(from this computer's own list)")
+        else:
+            self.details_label.setText(f"{who}: {len(ports)} open port(s)")
         for p in ports:
             row = self.details.rowCount()
             self.details.insertRow(row)
@@ -2350,8 +2565,16 @@ class MainWindow(QMainWindow):
             self.details.setItem(row, 1, QTableWidgetItem(p["proto"]))
             self.details.setItem(row, 2, QTableWidgetItem(p["service"]))
             self.details.setItem(row, 3, QTableWidgetItem(p["version"]))
-            note = QTableWidgetItem(("⚠ " + port_risk(p)) if port_risk(p) else "")
-            note.setForeground(QColor(AMBER))
+            if port_risk(p):
+                note = QTableWidgetItem("⚠ " + port_risk(p))
+                note.setForeground(QColor(AMBER))
+            elif local:
+                note = QTableWidgetItem("Temporary socket for the program's own traffic" if p.get("temporary")
+                                        else "Only this computer (localhost)" if p.get("local_only")
+                                        else "Reachable from your network")
+                note.setForeground(QColor(TEXT if not (p.get("local_only") or p.get("temporary")) else MUTED))
+            else:
+                note = QTableWidgetItem("")
             self.details.setItem(row, 4, note)
             if port_risk(p):
                 port_item.setForeground(QColor(AMBER))
@@ -3112,7 +3335,8 @@ class MainWindow(QMainWindow):
             return
         self.watch_ports = self.watch_ports_box.isChecked()
         scan = ["--top-ports", "100", *LAN_FAST] if self.watch_ports else ["-sn"]
-        args = ["-n", "-T4", *scan, "-oX", "-", *iface_args(net), str(net["network"])]
+        args = ["-n", "-T4", *scan, "-oX", "-", *iface_args(net), "--exclude", net["local_ip"],
+                str(net["network"])]
         if IS_WIN:
             args.insert(0, "--unprivileged")
         elif self.nmap_caps:
@@ -3145,6 +3369,9 @@ class MainWindow(QMainWindow):
             h["mac"] = h["mac"] or macs.get(h["ip"], "")
             h["vendor"] = h["vendor"] or mac_vendor(h["mac"])
             found.append((h, parse_ports(elem) if self.watch_ports else None))
+        if net["mac"] and not any(h["ip"] == net["local_ip"] for h, _ in found):
+            found.append(({"ip": net["local_ip"], "hostname": socket.gethostname(), "mac": net["mac"],
+                           "vendor": "(this computer)", "os": ""}, None))  # excluded from nmap, but online
         hosts = [h for h, _ in found]
         first_run = not self.devices.known_macs()
         new = self.devices.record(hosts)
@@ -3156,7 +3383,7 @@ class MainWindow(QMainWindow):
         top = {"tcp": port_set(top_tcp_ports(100)), "udp": set()}
         with self.devices.batch():
             for h, ports in found:
-                if not (self.watch_ports and h["mac"]):
+                if not (self.watch_ports and h["mac"]) or ports is None:  # None: this computer
                     continue
                 opened, closed = self.devices.update_ports(h["mac"], ports, top)
                 if (opened or closed) and h["mac"] not in new:  # new devices just get a baseline
@@ -3196,7 +3423,7 @@ class MainWindow(QMainWindow):
             "netscan": 1,
             "saved": datetime.datetime.now().isoformat(timespec="seconds"),
             "target": self.last_target,
-            "hosts": [{**h, "ports": self.ports.get(ip)} for ip, h in
+            "hosts": [{**h, "ports": self.network_ports(ip) if ip in self.ports else None} for ip, h in
                       sorted(self.hosts.items(), key=lambda kv: ipaddress.ip_address(kv[0]))],
         }
 
@@ -3250,7 +3477,8 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError, KeyError, TypeError) as e:
             QMessageBox.warning(self, "NetScan", f"Could not read scan file:\n{e}")
             return
-        changes, gone = compare_scans(baseline, self.hosts, self.ports)
+        changes, gone = compare_scans(baseline, self.hosts,
+                                      {ip: self.network_ports(ip) for ip in self.ports})
         self.table.setColumnHidden(COL_CHANGE, False)
         for row in range(self.table.rowCount()):
             self.set_change(row, changes.get(self.table.item(row, COL_IP).text(), ""))
