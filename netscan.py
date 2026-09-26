@@ -714,6 +714,53 @@ def compare_scans(baseline, hosts, ports):
     return changes, gone
 
 
+# ---- device names from the router ---------------------------------------------
+# Routers running dnsmasq (OpenWrt, OpenSync and many others) keep every DHCP client's
+# name in a lease file. NetScan reads it over SSH with one read-only command.
+ROUTER_LEASE_CMD = ("cat /tmp/dhcp.leases 2>/dev/null || cat /var/lib/misc/dnsmasq.leases 2>/dev/null"
+                    " || cat /tmp/dnsmasq.leases 2>/dev/null")
+
+
+def parse_dnsmasq_leases(text):
+    """dnsmasq leases, '<expiry> <mac> <ip> <hostname|*> <client-id|*>' per line -> {MAC: (ip, name)}."""
+    leases = {}
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) >= 4 and re.fullmatch(r"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}", f[1]):
+            leases[f[1].upper()] = (f[2], "" if f[3] == "*" else f[3][:63])
+    return leases
+
+
+def askpass_helper():
+    """Small launcher that ssh runs (SSH_ASKPASS) to ask for a password with NetScan's own dialog.
+
+    The password goes straight from that separate process to ssh; the NetScan window never sees it.
+    """
+    script, exe = os.path.abspath(__file__), sys.executable
+    if IS_WIN:
+        path, body = os.path.join(data_dir(), "askpass.cmd"), f'@"{exe}" "{script}" --askpass %*\r\n'
+    else:
+        path = os.path.join(data_dir(), "askpass")
+        body = f'#!/bin/sh\nexec {shlex.quote(exe)} {shlex.quote(script)} --askpass "$@"\n'
+    with open(path, "w") as f:
+        f.write(body)
+    os.chmod(path, 0o700)
+    return path
+
+
+def askpass_main(prompt):
+    """--askpass mode: show a password box, print the answer for ssh, exit."""
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    app.setApplicationName("NetScan")
+    apply_theme(app, QSettings("netscan", "netscan").value("theme", "system", type=str))
+    text, ok = QInputDialog.getText(None, "NetScan: router login", prompt.strip() or "Password:",
+                                    QLineEdit.Password)
+    if not ok:
+        return 1
+    sys.stdout.write(text + "\n")
+    return 0
+
+
 def valid_ssh_user(name):
     """Usernames only: no spaces, '@' or shell characters, and can't start with '-' (an ssh option)."""
     return bool(re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,63}", name))
@@ -1550,6 +1597,7 @@ class MainWindow(QMainWindow):
         self.new_devices = set()
         self.online_macs = set()  # seen in the latest scan or watch check
         self.history_path = None  # this scan's file in the history folder
+        self.router_proc = None
         self._icons = {}
         self.watch_proc = None
         self.networks = []
@@ -2192,7 +2240,9 @@ class MainWindow(QMainWindow):
                             self.devices.update_ports(h["mac"], self.network_ports(ip), top)
             if self.current:
                 self.online_macs = {h["mac"] for h in self.hosts.values() if h["mac"]}
-            for ip in self.hosts:
+            for ip, h in self.hosts.items():
+                if not h["hostname"] and self.devices.get(h).get("hostname"):
+                    h["hostname"] = self.devices.get(h)["hostname"]  # e.g. learned from the router
                 self.refresh_row(ip)  # MACs, trust and device types are settled now
             self.history_path = save_history(self.scan_record()) if self.hosts else None
             self.refresh_devices()
@@ -2617,6 +2667,9 @@ class MainWindow(QMainWindow):
                 menu.addAction("VNC remote desktop", lambda: self.open_service("vnc", ip, vnc))
             if 22 in open_ports:
                 menu.addAction("Copy ssh command", lambda: self.copy_ssh(h))
+            if ip == self.gateway():
+                act = menu.addAction("Get device names from router (SSH)", lambda: self.fetch_router_names(h))
+                act.setEnabled(not (self.router_proc and self.router_proc.state() != QProcess.NotRunning))
             web = next(((port, scheme) for port, scheme in WEB_PORTS if port in open_ports), None)
             if web:
                 port, scheme = web
@@ -2661,6 +2714,79 @@ class MainWindow(QMainWindow):
             self.devices.set_field(host, "ssh_user", user)
             self.show_device_details()
         return f"{user}@{host['ip']}"
+
+    def fetch_router_names(self, router):
+        """Read the router's DHCP lease list over SSH (read-only) and name devices that have no name."""
+        ssh = find_program("ssh")
+        if not ssh:
+            self.status.setText("ssh not found; install OpenSSH to read names from the router.")
+            return
+        target = self.ssh_target(router)  # asks for the router's username the first time
+        if not target:
+            return
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("SSH_ASKPASS", askpass_helper())
+        env.insert("SSH_ASKPASS_REQUIRE", "force")  # always use the dialog, even from a terminal
+        self.router_proc = proc = QProcess(self)
+        proc.setProcessEnvironment(env)
+        proc.setStandardInputFile(QProcess.nullDevice())
+        proc.finished.connect(lambda code, _s: self.router_names_done(proc, code))
+        self.set_dot(ACCENT)
+        self.status.setText(f"Reading the device list from the router ({target})… "
+                            "Enter the router's password if asked.")
+        # StrictHostKeyChecking=yes: only a router whose key you've already accepted in a terminal.
+        proc.start(ssh, ["-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10",
+                         "-o", "NumberOfPasswordPrompts=2", target, ROUTER_LEASE_CMD])
+        QTimer.singleShot(120_000, lambda: proc.state() != QProcess.NotRunning and proc.kill())
+
+    def router_names_done(self, proc, code):
+        out = bytes(proc.readAllStandardOutput()).decode(errors="replace")
+        err = bytes(proc.readAllStandardError()).decode(errors="replace")
+        leases = parse_dnsmasq_leases(out)
+        if code != 0 or not leases:
+            self.set_dot(AMBER)
+            if "Host key verification failed" in err or "No ED25519 host key" in err or "host key" in err.lower():
+                msg = ("The router's SSH key isn't known on this computer (or it changed). "
+                       f"Connect once from a terminal (ssh {self.ssh_target_text()}) to check and accept it, "
+                       "then try again.")
+            elif "Permission denied" in err:
+                msg = "Router login failed: wrong username or password."
+            elif code == 0:
+                msg = "Logged in to the router, but it has no dnsmasq lease list (/tmp/dhcp.leases)."
+            else:
+                last = [l for l in err.splitlines() if l.strip() and not l.startswith("**")]
+                msg = "Couldn't read the router's device list: " + (last[-1] if last else f"ssh exit code {code}")
+            self.status.setText(msg)
+            return
+        named = 0
+        by_ip = {lease_ip: name for lease_ip, name in leases.values()}
+        with self.devices.batch():
+            for ip, h in self.hosts.items():
+                # Match by MAC; fall back to IP only for hosts whose MAC we don't know.
+                name = leases[h["mac"]][1] if h["mac"] in leases else ("" if h["mac"] else by_ip.get(ip, ""))
+                if name and not h["hostname"]:
+                    h["hostname"] = name
+                    self.pending.discard(ip)
+                    self.devices.update(h, hostname=name)
+                    self.refresh_row(ip)
+                    named += 1
+            for mac, (_ip, name) in leases.items():  # devices remembered but not in this scan
+                rec = self.devices.devices.get(mac)
+                if name and rec is not None and not rec.get("hostname"):
+                    rec["hostname"] = name
+                    self.devices.save()
+        self.table.resizeColumnToContents(COL_HOST)
+        self.refresh_devices()
+        self.set_dot(GREEN)
+        self.status.setText(f"Router: {len(leases)} device(s) in its DHCP list, "
+                            f"{sum(1 for _, n in leases.values() if n)} with names; "
+                            f"named {named} device(s) that had no name.")
+
+    def ssh_target_text(self):
+        gw = self.gateway()
+        h = self.hosts.get(gw, {"ip": gw or "router"})
+        user = self.devices.get(h).get("ssh_user") if gw in self.hosts else ""
+        return f"{user}@{h['ip']}" if user else h["ip"]
 
     def ssh_to(self, host):
         target = self.ssh_target(host)
@@ -3579,6 +3705,8 @@ def self_test():
 
 
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "--askpass":
+        sys.exit(askpass_main(" ".join(sys.argv[2:])))
     if "--self-test" in sys.argv:
         sys.exit(self_test())
     app = QApplication(sys.argv)
