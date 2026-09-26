@@ -20,38 +20,52 @@ import codecs
 import csv
 import datetime
 import getpass
+import html
+import http.client
 import ipaddress
 import json
+import math
 import os
 import platform
 import re
 import shlex
 import shutil
 import socket
+import ssl
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import xml.etree.ElementTree as ET
 
 from PySide6.QtCore import (
-    QObject, QProcess, QProcessEnvironment, QSettings, QStandardPaths, Qt, QTimer, QUrl,
-    Signal,
+    QItemSelectionModel, QObject, QPointF, QProcess, QProcessEnvironment, QRectF, QSettings,
+    QStandardPaths, Qt, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QDesktopServices, QFont, QFontDatabase, QGuiApplication,
-    QIcon, QKeySequence, QPainter, QPalette,
+    QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
-    QMessageBox, QPlainTextEdit, QScrollArea, QStackedWidget, QSystemTrayIcon, QTabBar,
+    QMessageBox, QPlainTextEdit, QScrollArea, QStackedWidget, QSystemTrayIcon, QTabBar, QToolTip,
     QProgressBar, QPushButton, QSplitter, QStyleFactory, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
-COLUMNS = ["IP Address", "Name", "Hostname", "MAC Address", "Vendor", "OS", "Open Ports", "Change"]
-COL_IP, COL_NAME, COL_HOST, COL_MAC, COL_VENDOR, COL_OS, COL_PORTS, COL_CHANGE = range(8)
+COLUMNS = ["IP Address", "Name", "Hostname", "MAC Address", "Vendor", "Identified as", "OS", "Open Ports",
+           "Change"]
+COL_IP, COL_NAME, COL_HOST, COL_MAC, COL_VENDOR, COL_INFO, COL_OS, COL_PORTS, COL_CHANGE = range(9)
+# Discovery details kept per device (and remembered in the device list between scans).
+DISCOVERY_FIELDS = ("model", "maker", "friendly", "services", "svc_types", "upnp_type", "ipv6")
 PORT_COLUMNS = ["Port", "Proto", "Service", "Version", "Note"]
 # Devices tab: everything NetScan remembers. The first column is the online dot.
 DEV_COLUMNS = ["", "Name", "Type", "Last seen", "Trusted", "Last IP", "Hostname", "MAC Address", "Vendor"]
@@ -682,6 +696,432 @@ def lookup_name(ip):
     return name
 
 
+# ---- extra discovery: mDNS, SSDP/UPnP, router port forwards, IPv6, web titles -----
+# All of it is read-only and needs no password. Runs in the background after Find Hosts.
+
+MDNS_ADDR, SSDP_ADDR = ("224.0.0.251", 5353), ("239.255.255.250", 1900)
+
+# mDNS/DNS-SD service types that say what kind of device something is.
+SERVICE_TYPE_HINTS = {
+    "_googlecast._tcp": "media", "_airplay._tcp": "media", "_raop._tcp": "media",
+    "_spotify-connect._tcp": "media", "_sonos._tcp": "media", "_roku-rcp._tcp": "media",
+    "_ipp._tcp": "printer", "_ipps._tcp": "printer", "_printer._tcp": "printer",
+    "_pdl-datastream._tcp": "printer", "_scanner._tcp": "printer", "_uscan._tcp": "printer",
+    "_hap._tcp": "iot", "_hue._tcp": "iot", "_matter._tcp": "iot", "_esphomelib._tcp": "iot",
+    "_shelly._tcp": "iot", "_adisk._tcp": "nas", "_apple-mobdev2._tcp": "phone",
+    "_workstation._tcp": "computer",
+}
+# TXT keys that carry a model name (Chromecast md, printers ty/usb_MDL, Apple model/am/rpMd).
+MODEL_TXT_KEYS = ("md", "ty", "usb_MDL", "product", "model", "am", "rpMd")
+
+
+def _dns_name(buf, off):
+    """(name, offset just past it) for a possibly-compressed DNS name."""
+    labels, end, jumps = [], None, 0
+    while off < len(buf) and jumps < 30:
+        n = buf[off]
+        if n == 0:
+            off += 1
+            break
+        if n & 0xC0 == 0xC0:
+            if end is None:
+                end = off + 2
+            off = ((n & 0x3F) << 8) | buf[off + 1]
+            jumps += 1
+            continue
+        labels.append(buf[off + 1:off + 1 + n].decode(errors="replace"))
+        off += 1 + n
+    return ".".join(labels), (end if end is not None else off)
+
+
+def parse_dns_records(buf):
+    """Every resource record in a DNS message: (type, name, value).
+
+    PTR -> name, SRV -> (port, target), TXT -> [strings], A/AAAA -> address, others -> None.
+    """
+    qd, an, ns, ar = struct.unpack(">4H", buf[4:12])
+    off, records = 12, []
+    for _ in range(qd):
+        off = _dns_name(buf, off)[1] + 4
+    for _ in range(an + ns + ar):
+        name, off = _dns_name(buf, off)
+        rtype, _cls, _ttl, length = struct.unpack(">HHIH", buf[off:off + 10])
+        off += 10
+        data = buf[off:off + length]
+        if rtype == 12:
+            value = _dns_name(buf, off)[0]
+        elif rtype == 33 and length >= 7:
+            value = (struct.unpack(">H", data[4:6])[0], _dns_name(buf, off + 6)[0])
+        elif rtype == 16:
+            value, i = [], 0
+            while i < len(data):
+                value.append(data[i + 1:i + 1 + data[i]].decode(errors="replace"))
+                i += 1 + data[i]
+        elif rtype == 1 and length == 4:
+            value = socket.inet_ntoa(data)
+        elif rtype == 28 and length == 16:
+            value = socket.inet_ntop(socket.AF_INET6, data)
+        else:
+            value = None
+        records.append((rtype, name, value))
+        off += length
+    return records
+
+
+def _dns_query(names, qtype=12):
+    q = b"".join(b"".join(bytes([len(p)]) + p.encode() for p in n.split(".")) + b"\0"
+                 + struct.pack(">HH", qtype, 1) for n in names)
+    return struct.pack(">6H", 0, 0, len(names), 0, 0, 0) + q
+
+
+def _mdns_socket(local_ip):
+    """Socket on port 5353 in the mDNS group, so answers sent to the group reach us.
+
+    Multicast answers get through host firewalls like ufw, whose default rules allow mDNS;
+    direct (unicast) answers to a random port usually don't.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    try:
+        s.bind(("", 5353))
+    except OSError:
+        s.bind(("", 0))  # 5353 taken exclusively (e.g. Windows): answers may be unicast then
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                 socket.inet_aton(MDNS_ADDR[0]) + socket.inet_aton(local_ip))
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local_ip))
+    s.settimeout(0.25)
+    return s
+
+
+def _collect(sock, seconds, keep):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        try:
+            data, (ip, _port) = sock.recvfrom(9000)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        keep(ip, data)
+
+
+def mdns_browse(local_ip, seconds=3.0):
+    """What every mDNS responder offers: {ip: {"name", "services", "types", "model", "friendly"}}."""
+    found = {}
+
+    def keep(ip, data):
+        if len(data) < 12 or not data[2] & 0x80:  # responses only
+            return
+        try:
+            records = parse_dns_records(data)
+        except (struct.error, IndexError):
+            return
+        d = found.setdefault(ip, {"name": "", "services": [], "types": [], "txt": {}})
+        for rtype, name, value in records:
+            if rtype == 12 and name == "_services._dns-sd._udp.local":
+                types.add(value)
+            elif rtype == 12 and value and value.endswith(name) and name.startswith("_"):
+                label, kind = value[:-len(name) - 1], name.removesuffix(".local")
+                if label and label not in d["services"]:
+                    d["services"].append(label)
+                if kind not in d["types"]:
+                    d["types"].append(kind)
+            elif rtype == 1 and value == ip and name.endswith(".local"):
+                d["name"] = name.removesuffix(".local")
+            elif rtype == 16 and value:
+                for kv in value:
+                    key, _, val = kv.partition("=")
+                    if val:
+                        d["txt"].setdefault(key, val)
+
+    types = set()
+    try:
+        sock = _mdns_socket(local_ip)
+    except OSError:
+        return found
+    with sock:
+        # Each question goes out twice: mDNS answers are best-effort and sleepy devices miss one.
+        for share in (0.2, 0.25):
+            sock.sendto(_dns_query(["_services._dns-sd._udp.local"]), MDNS_ADDR)
+            _collect(sock, seconds * share, keep)
+        for share in (0.25, 0.3):
+            if types:
+                sock.sendto(_dns_query(sorted(types)), MDNS_ADDR)
+            _collect(sock, seconds * share, keep)
+    for d in found.values():
+        txt = d.pop("txt")
+        d["model"] = next((txt[k] for k in MODEL_TXT_KEYS if txt.get(k)), "")
+        d["friendly"] = txt.get("fn", "")
+        # Instance names often include the host's MAC ("pi5 [88:a2:...]"); keep them readable.
+        d["services"] = [re.sub(r"\s*\[[0-9a-f:]{17}\]$", "", s) for s in d["services"]]
+    return found
+
+
+def ssdp_search(local_ip, seconds=3.0):
+    """UPnP devices answering an SSDP search: {ip: sorted description URLs}."""
+    found = {}
+
+    def keep(ip, data):
+        m = re.search(rb"(?im)^location:\s*(\S+)", data)
+        if m:
+            found.setdefault(ip, set()).add(m.group(1).decode(errors="replace"))
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    except OSError:
+        return {}
+    with s:
+        try:
+            s.bind((local_ip, 0))
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local_ip))
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+            s.settimeout(0.25)
+            for st in ("ssdp:all", "upnp:rootdevice"):
+                s.sendto((f'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\n'
+                          f"MX: 2\r\nST: {st}\r\n\r\n").encode(), SSDP_ADDR)
+        except OSError:
+            return {}
+        _collect(s, seconds, keep)
+    return {ip: sorted(urls) for ip, urls in found.items()}
+
+
+def _http_get(url, timeout=3.0, limit=262144):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE  # LAN devices use self-signed certificates
+    req = urllib.request.Request(url, headers={"User-Agent": "NetScan"})
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+        return r.read(limit)
+
+
+def _xml_text(elem, tag):
+    """Text of the first descendant with this local tag name (UPnP XML uses namespaces)."""
+    for e in elem.iter():
+        if e.tag.rsplit("}", 1)[-1] == tag and e.text:
+            return e.text.strip()
+    return ""
+
+
+def upnp_description(url):
+    """A UPnP device description: names, model, device type, and its WAN connection service if it's a router."""
+    try:
+        root = ET.fromstring(_http_get(url))
+    except (OSError, ValueError, ET.ParseError, http.client.HTTPException):
+        return None
+    info = {"url": url, "friendly": _xml_text(root, "friendlyName"),
+            "manufacturer": _xml_text(root, "manufacturer"), "model": _xml_text(root, "modelName"),
+            "model_number": _xml_text(root, "modelNumber"), "device_type": _xml_text(root, "deviceType"),
+            "wan": None}
+    for svc in root.iter():
+        if svc.tag.rsplit("}", 1)[-1] != "service":
+            continue
+        stype = _xml_text(svc, "serviceType")
+        if re.search(r":service:WAN(IP|PPP)Connection:\d", stype):
+            info["wan"] = (stype, urllib.parse.urljoin(url, _xml_text(svc, "controlURL")))
+            break
+    return info
+
+
+def _soap(control_url, service_type, action, args=""):
+    body = (f'<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+            f's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+            f'<u:{action} xmlns:u="{service_type}">{args}</u:{action}></s:Body></s:Envelope>')
+    req = urllib.request.Request(control_url, body.encode(), {
+        "Content-Type": 'text/xml; charset="utf-8"', "SOAPAction": f'"{service_type}#{action}"'})
+    with urllib.request.urlopen(req, timeout=3) as r:
+        return ET.fromstring(r.read(65536))
+
+
+def upnp_port_mappings(wan):
+    """Ask the router which ports devices have opened to the internet via UPnP (read-only).
+
+    Returns (public_ip, [{"protocol", "external_port", "client", "internal_port", "description",
+    "enabled", "lease"}]).
+    """
+    stype, control = wan
+    try:
+        public_ip = _xml_text(_soap(control, stype, "GetExternalIPAddress"), "NewExternalIPAddress")
+    except (OSError, ET.ParseError, http.client.HTTPException):
+        public_ip = ""
+    mappings = []
+    for index in range(256):
+        try:
+            r = _soap(control, stype, "GetGenericPortMappingEntry",
+                      f"<NewPortMappingIndex>{index}</NewPortMappingIndex>")
+        except (OSError, ET.ParseError, http.client.HTTPException):
+            break  # the router answers "SpecifiedArrayIndexInvalid" (an HTTP 500) past the last entry
+        t = lambda tag: _xml_text(r, tag)
+        port = t("NewExternalPort")
+        mappings.append({"protocol": t("NewProtocol").lower(), "external_port": int(port) if port.isdigit() else 0,
+                         "client": t("NewInternalClient"), "internal_port": t("NewInternalPort"),
+                         "description": t("NewPortMappingDescription"), "enabled": t("NewEnabled") != "0",
+                         "lease": t("NewLeaseDuration")})
+    return public_ip, mappings
+
+
+IGD_PATHS = ("/rootDesc.xml", "/igd.xml", "/gatedesc.xml", "/description.xml", "/DeviceDescription.xml",
+             "/upnp/IGD.xml", "/igdupnp/igddesc.xml")
+IGD_PORTS = (5000, 49152, 2048, 1780, 49000, 52869, 5431, 60000, 80)
+
+
+def find_router_upnp(gateway, candidates=(), ports=()):
+    """The router's UPnP description, trying: remembered/SSDP URLs, then its open ports, then common ones."""
+    urls = list(candidates)
+    for port in list(ports) + [p for p in IGD_PORTS if p not in ports]:
+        urls += [f"http://{gateway}:{port}{path}" for path in IGD_PATHS]
+    for url in dict.fromkeys(urls):
+        info = upnp_description(url)
+        if info and info["wan"]:
+            return info
+    return None
+
+
+def ipv6_neighbours(net):
+    """{MAC: [IPv6 addresses]} of devices answering an all-nodes ping on the network's interface."""
+    iface = net["iface"]
+    if IS_WIN:
+        idx = net.get("ifindex")
+        run_text("ping", "-n", "2", f"ff02::1%{idx}" if idx else "ff02::1")
+        rows = powershell_json("Get-NetNeighbor -AddressFamily IPv6 | Where-Object { $_.State -ne 'Unreachable' } | "
+                               "Select-Object IPAddress, LinkLayerAddress | ConvertTo-Json -Compress")
+        pairs = [(r.get("IPAddress", ""), (r.get("LinkLayerAddress") or "").replace("-", ":")) for r in as_list(rows)]
+    elif IS_MAC:
+        run_text("/sbin/ping6", "-c", "2", f"ff02::1%{iface}")
+        pairs = []
+        for line in run_text("/usr/sbin/ndp", "-an").splitlines()[1:]:
+            f = line.split()
+            if len(f) >= 2 and ":" in f[1]:
+                pairs.append((f[0], normalize_mac(f[1])))
+    else:
+        # Let the multicast ping run its full time (-c would stop at the first couple of replies,
+        # before the kernel has learned everyone's MAC), then resolve any MAC still missing.
+        replies = run_text("ping", "-6", "-w", "2", "-i", "1", f"ff02::1%{iface}")  # users: >= 1s for multicast
+        addrs = set(re.findall(r"from ([0-9a-f:]+)%", replies))
+
+        def table():
+            return {n.get("dst", ""): n.get("lladdr", "") for n in ip_json("-6", "neigh", "show", "dev", iface)
+                    if n.get("lladdr") and "FAILED" not in n.get("state", [])}
+
+        known = table()
+        missing = [a for a in addrs if a not in known]
+        if missing:
+            with ThreadPoolExecutor(max_workers=16) as ex:
+                list(ex.map(lambda a: run_text("ping", "-6", "-c", "1", "-w", "1", f"{a}%{iface}"), missing))
+            known = table()
+        pairs = list(known.items())
+    out = {}
+    for addr, mac in pairs:
+        mac = mac.upper()
+        addr = addr.split("%")[0]
+        if mac and addr and mac not in ("00:00:00:00:00:00", "FF:FF:FF:FF:FF:FF") and not addr.startswith("ff"):
+            out.setdefault(mac, [])
+            if addr not in out[mac]:
+                out[mac].append(addr)
+    return out
+
+
+WEB_HINT_PORTS = {80, 81, 443, 591, 3000, 5000, 5001, 7080, 8000, 8008, 8080, 8081, 8088, 8123, 8443,
+                  8888, 9000, 9090, 9443, 10000}
+
+
+def is_web_port(p):
+    return p["proto"] == "tcp" and (p["port"] in WEB_HINT_PORTS
+                                    or any(w in (p.get("service") or "") for w in ("http", "ssl", "https")))
+
+
+TLS_HINT_PORTS = {443, 465, 636, 853, 993, 995, 5001, 7681, 8443, 9443}
+
+
+def is_tls_port(p):
+    return p["proto"] == "tcp" and (p["port"] in TLS_HINT_PORTS
+                                    or any(w in (p.get("service") or "") for w in ("ssl", "https", "tls")))
+
+
+def parse_certificate(der):
+    """{subject, issuer, expires (ISO date), days_left, self_signed, names} from a DER certificate."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        c = x509.load_der_x509_certificate(der)
+        cn = lambda name: next((a.value for a in name.get_attributes_for_oid(NameOID.COMMON_NAME)), "") \
+            or name.rfc4514_string()
+        try:
+            names = c.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(
+                x509.DNSName)
+        except x509.ExtensionNotFound:
+            names = []
+        expires = c.not_valid_after_utc
+        subject, issuer, self_signed = cn(c.subject), cn(c.issuer), c.subject == c.issuer
+    except ImportError:
+        # No 'cryptography' (e.g. the macOS/Windows installs): CPython's own decoder, via a temp file.
+        fd, path = tempfile.mkstemp(suffix=".pem")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(ssl.DER_cert_to_PEM_cert(der))
+            d = ssl._ssl._test_decode_cert(path)
+        finally:
+            os.remove(path)
+        flat = lambda rdns: dict(x for rdn in rdns for x in rdn)
+        subject, issuer = flat(d.get("subject", ())), flat(d.get("issuer", ()))
+        self_signed = subject == issuer
+        subject, issuer = subject.get("commonName", ""), issuer.get("commonName", "") or issuer.get("organizationName", "")
+        names = [v for k, v in d.get("subjectAltName", ()) if k == "DNS"]
+        expires = datetime.datetime.fromtimestamp(ssl.cert_time_to_seconds(d["notAfter"]), datetime.timezone.utc)
+    return {"subject": subject, "issuer": issuer, "expires": expires.date().isoformat(),
+            "days_left": (expires - now).days, "self_signed": self_signed, "names": names[:6]}
+
+
+def tls_certificate(ip, port, timeout=3):
+    """Certificate a TLS service presents (not verified; LAN devices are usually self-signed), or None."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as raw, \
+                ctx.wrap_socket(raw, server_hostname=None) as tls:
+            der = tls.getpeercert(binary_form=True)
+        return parse_certificate(der) if der else None
+    except (OSError, ValueError):
+        return None
+
+
+def cert_note(cert):
+    """(text for the details table, warning or '')."""
+    who = "self-signed" if cert["self_signed"] else f"issued by {cert['issuer']}"
+    text = f"cert {cert['subject'] or '(no name)'}, {who}, expires {cert['expires']}"
+    days = cert["days_left"]
+    warn = (f"Certificate expired {-days} day(s) ago" if days < 0 else
+            f"Certificate expires in {days} day(s)" if days < 14 else "")
+    return text, warn
+
+
+def web_title(ip, port):
+    """<title> of the page at ip:port (HTTPS first for TLS-ish ports), or 'HTTP 401 Unauthorized' etc."""
+    schemes = ("https", "http") if port in (443, 8443, 9443, 5001) else ("http", "https")
+    host = f"[{ip}]" if ":" in ip else ip
+    for scheme in schemes:
+        url = f"{scheme}://{host}:{port}/"
+        try:
+            body = _http_get(url, timeout=3, limit=65536)
+            status = ""
+        except urllib.error.HTTPError as e:
+            body, status = e.read(65536), f"HTTP {e.code} {e.reason}"
+        except (OSError, ValueError, http.client.HTTPException):
+            continue
+        m = re.search(rb"(?is)<title[^>]*>(.*?)</title>", body)
+        if m:
+            title = re.sub(r"\s+", " ", html.unescape(m.group(1).decode(errors="replace"))).strip()
+            if title:
+                return title[:80]
+        if status:
+            return status
+        return ""
+    return ""
+
+
 def compare_scans(baseline, hosts, ports):
     """Diff the current scan against a saved one.
 
@@ -995,11 +1435,29 @@ def guess_type(host, ports=None, gateway=None):
     for kind, words in _TYPE_HOSTNAMES:
         if any(w in name for w in words):
             return kind
+    # What the device announces about itself beats guessing from its network card's maker.
+    hints = [SERVICE_TYPE_HINTS.get(t) for t in host.get("svc_types") or []]
+    for kind in ("printer", "media", "iot", "nas", "phone"):
+        if kind in hints:
+            return kind
+    upnp_type = (host.get("upnp_type") or "").lower()
+    for word, kind in (("internetgatewaydevice", "router"), ("mediarenderer", "media"), ("printer", "printer")):
+        if word in upnp_type:
+            return kind
+    model = f'{host.get("model") or ""} {host.get("friendly") or ""}'.lower()
+    for words, kind in ((("iphone", "ipad", "pixel", "galaxy"), "phone"),
+                        (("macbook", "imac", "mac mini", "thinkpad"), "computer"),
+                        (("tv", "chromecast", "shield", "roku", "sonos"), "media"),
+                        (("printer", "laserjet", "officejet", "deskjet"), "printer")):
+        if any(w in model for w in words):
+            return kind
     if open_tcp & {5000, 5001} and open_tcp & {139, 445}:
         return "nas"
     for kind, words in _TYPE_VENDORS:
         if any(w in vendor for w in words):
             return kind
+    if "computer" in hints:
+        return "computer"
     if vendor.startswith("(private"):
         return "phone"  # phones and tablets are what randomise their MAC per network
     if any(w in os_name for w in ("windows", "mac os", "macos", "linux")) or open_tcp & {22, 3389, 5900}:
@@ -1146,6 +1604,34 @@ class DeviceStore:
             return rec["type"], False
         merged = {**rec, **{k: v for k, v in host.items() if v}}
         return guess_type(merged, ports if ports is not None else rec.get("ports"), gateway), True
+
+    USER_FIELDS = ("nickname", "notes", "trusted", "type", "ssh_user")
+
+    def merge_from(self, devices):
+        """Merge another NetScan's device list. New devices are added whole; for known ones, only
+        your own fields (nickname, notes, trusted, type, SSH user) that are empty here are filled.
+        Returns (added, updated)."""
+        added = updated = 0
+        with self.batch():
+            for key, rec in devices.items():
+                if not isinstance(rec, dict):
+                    continue
+                mine = self.devices.get(key)
+                if mine is None:
+                    self.devices[key] = dict(rec)
+                    added += 1
+                    continue
+                changed = False
+                for field in self.USER_FIELDS:
+                    if rec.get(field) and not mine.get(field):
+                        mine[field] = rec[field]
+                        changed = True
+                for field in ("first_seen",):  # keep the earliest sighting
+                    if rec.get(field) and (not mine.get(field) or rec[field] < mine[field]):
+                        mine[field] = rec[field]
+                updated += changed
+            self.save()
+        return added, updated
 
     def wakeable(self):
         """Devices with a MAC, nicknamed ones first, then by name."""
@@ -1359,6 +1845,9 @@ QLabel#pill {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 
 
 QFrame#card {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px; }}
 QFrame#statusbar {{ background: {SURFACE}; border-top: 1px solid {BORDER}; }}
+QFrame#tile {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 10px; }}
+QLabel#tileValue {{ font-size: 16pt; font-weight: 700; }}
+QLabel#tileLabel {{ color: {MUTED}; font-size: 8pt; font-weight: 700; }}
 QScrollArea#plain, QScrollArea#plain > QWidget > QWidget {{ background: transparent; border: none; }}
 
 QPushButton {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 8px;
@@ -1372,7 +1861,7 @@ QPushButton#primary:hover {{ background: {ACCENT_HI}; border-color: {ACCENT_HI};
 QPushButton#primary:pressed {{ background: {PRIMARY_PRESSED}; }}
 QPushButton#primary:disabled {{ background: {PRIMARY_OFF_BG}; border-color: {PRIMARY_OFF_BG};
                                 color: {PRIMARY_OFF_FG}; }}
-QPushButton::menu-indicator {{ image: url({chevron}); width: 12px; height: 12px;
+QPushButton::menu-indicator {{ image: url("{chevron}"); width: 12px; height: 12px;
                                subcontrol-origin: padding; subcontrol-position: right center;
                                right: 8px; }}
 QPushButton#menuButton {{ padding-right: 28px; }}
@@ -1384,7 +1873,7 @@ QLineEdit:hover, QComboBox:hover, QPlainTextEdit:hover {{ border-color: {BORDER_
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
 QLineEdit:disabled, QComboBox:disabled {{ color: {DIM}; }}
 QComboBox::drop-down {{ border: none; width: 28px; }}
-QComboBox::down-arrow {{ image: url({chevron}); width: 12px; height: 12px; }}
+QComboBox::down-arrow {{ image: url("{chevron}"); width: 12px; height: 12px; }}
 QComboBox QAbstractItemView {{ background: {RAISED}; border: 1px solid {BORDER}; padding: 4px;
                                outline: 0; color: {TEXT}; selection-background-color: {ACCENT};
                                selection-color: #ffffff; }}
@@ -1394,7 +1883,7 @@ QCheckBox:disabled {{ color: {DIM}; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 5px;
                         border: 1px solid {BORDER_HI}; background: {BG}; }}
 QCheckBox::indicator:hover {{ border-color: {ACCENT}; }}
-QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: url({check}); }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: url("{check}"); }}
 QCheckBox::indicator:disabled {{ background: {SURFACE}; border-color: {BORDER}; }}
 QCheckBox::indicator:checked:disabled {{ background: {PRIMARY_OFF_BG}; border-color: {PRIMARY_OFF_BG}; }}
 
@@ -1535,14 +2024,831 @@ class SortItem(QTableWidgetItem):
         return (self.data(Qt.UserRole) or "") < (other.data(Qt.UserRole) or "")
 
 
+def ip_sort_key(ip):
+    addr = ipaddress.ip_address(ip)
+    return addr.version, addr
+
+
 class IPItem(QTableWidgetItem):
     """Sorts IP addresses numerically instead of as strings."""
 
     def __lt__(self, other):
         try:
-            return ipaddress.ip_address(self.text()) < ipaddress.ip_address(other.text())
+            return ip_sort_key(self.text()) < ip_sort_key(other.text())
         except ValueError:
             return super().__lt__(other)
+
+
+def run_discovery(job):
+    """Background part of discovery; every step is read-only and optional. Returns a result dict."""
+    net, gw, out = job["net"], job["gateway"], {"token": job["token"]}
+    with ThreadPoolExecutor(max_workers=24) as ex:
+        tasks = {}
+        if "names" in job["what"]:
+            tasks["mdns"] = ex.submit(mdns_browse, net["local_ip"])
+            tasks["ssdp"] = ex.submit(ssdp_search, net["local_ip"])
+            tasks["ipv6"] = ex.submit(ipv6_neighbours, net)
+        titles = {key: ex.submit(web_title, *key) for key in job["web"]}
+        certs = {key: ex.submit(tls_certificate, *key) for key in job.get("tls", [])}
+        for key, fut in tasks.items():
+            try:
+                out[key] = fut.result()
+            except Exception as e:  # noqa: BLE001 - one failing source mustn't sink the rest
+                out[key] = {}
+                out.setdefault("errors", []).append(f"{key}: {e}")
+        out["certs"] = {key: fut.result() for key, fut in certs.items() if fut.result()}
+        out["titles"] = {}
+        for key, fut in titles.items():
+            try:
+                if fut.result():
+                    out["titles"][key] = fut.result()
+            except Exception:  # noqa: BLE001
+                pass
+        if "names" in job["what"]:
+            descs = {}
+            for ip, urls in job.get("announced", {}).items():  # heard by the SsdpListener
+                out.setdefault("ssdp", {}).setdefault(ip, [])
+                out["ssdp"][ip] = sorted(set(out["ssdp"][ip]) | set(urls))
+            wanted = {ip: urls[:3] for ip, urls in out.get("ssdp", {}).items()}
+            futs = {(ip, u): ex.submit(upnp_description, u) for ip, urls in wanted.items() for u in urls}
+            for (ip, _u), fut in futs.items():
+                info = fut.result()
+                if info and ip not in descs:
+                    descs[ip] = info
+                elif info and info["wan"] and not descs[ip]["wan"]:
+                    descs[ip] = info
+            out["upnp_devices"] = descs
+    if "names" in job["what"] and gw:
+        known = [d["url"] for ip, d in out.get("upnp_devices", {}).items() if ip == gw and d["wan"]]
+        router = find_router_upnp(gw, known + list(job["upnp_urls"]), job["upnp_ports"])
+        if not router and job.get("nmap"):
+            # UPnP often sits on a random high port that quick scans skip and firewalls hide from
+            # SSDP. Sweep the router once; the URL found is remembered, so this is rare.
+            out_g = run_text(job["nmap"], "-n", "-Pn", "-T4", "--open", "-p", "1024-65535",
+                             *iface_args(net), gw, "-oG", "-")
+            ports = [int(x) for x in re.findall(r"(\d+)/open/tcp", out_g)]
+            router = find_router_upnp(gw, (), [p for p in ports if p not in job["upnp_ports"]]) if ports else None
+        if router:
+            public_ip, mappings = upnp_port_mappings(router["wan"])
+            out["upnp"] = {"url": router["url"], "public_ip": public_ip, "mappings": mappings,
+                           "friendly": router["friendly"]}
+        else:
+            out["upnp"] = None
+    return out
+
+
+def ufw_active():
+    return not (IS_WIN or IS_MAC) and run_text("systemctl", "is-active", "ufw").strip() == "active"
+
+
+# ---- connection monitor ------------------------------------------------------
+
+# Categorical series colours, fixed order, stepped per theme. Validated with the dataviz
+# palette checker on NetScan's chart surfaces (#ffffff light, #151823 dark): CVD and
+# normal-vision separation pass; three light slots are under 3:1, so every series is also
+# named in the stats table and (up to 4) directly labelled on the chart.
+SERIES_COLORS = {
+    "light": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"],
+    "dark": ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"],
+}
+MONITOR_MAX = len(SERIES_COLORS["dark"])  # never cycle colours: a 9th device isn't allowed
+
+
+def ping_once(ip, timeout_s=1):
+    """Round-trip time in ms for one ping, or None if no reply. Uses the system ping (no root)."""
+    if IS_WIN:
+        argv = ["ping", "-n", "1", "-w", str(timeout_s * 1000), ip]
+    elif IS_MAC:
+        argv = ["/sbin/ping", "-n", "-c", "1", "-W", str(timeout_s * 1000), ip]
+    else:
+        argv = ["ping", "-n", "-c", "1", "-W", str(timeout_s), ip]
+    out = run_text(*argv)
+    m = re.search(r"time[=<]\s*([\d.]+)\s*ms", out)
+    return float(m.group(1)) if m else None
+
+
+def latency_stats(samples):
+    """{last, avg, min, max, jitter, loss, count} over (time, ms-or-None) samples."""
+    values = [ms for _t, ms in samples if ms is not None]
+    lost = sum(1 for _t, ms in samples if ms is None)
+    jitter = (sum(abs(a - b) for a, b in zip(values, values[1:])) / (len(values) - 1)) if len(values) > 1 else None
+    return {"last": samples[-1][1] if samples else None,
+            "avg": sum(values) / len(values) if values else None,
+            "min": min(values) if values else None, "max": max(values) if values else None,
+            "jitter": jitter, "loss": 100 * lost / len(samples) if samples else None, "count": len(samples)}
+
+
+def nice_ceiling(value):
+    """Round an axis maximum up to 1/2/5 x 10^n so tick labels are readable."""
+    if value <= 0:
+        return 1.0
+    exp = 10 ** math.floor(math.log10(value))
+    return next(m * exp for m in (1, 2, 5, 10) if m * exp >= value)
+
+
+class Pinger(QObject):
+    """Pings each monitored address on a timer, in the background; one ping in flight per address."""
+
+    result = Signal(str, float, object)  # ip, time.time(), ms or None
+
+    def __init__(self):
+        super().__init__()
+        self.pool = ThreadPoolExecutor(max_workers=MONITOR_MAX)
+        self.busy = set()
+
+    def ping(self, ips):
+        for ip in ips:
+            if ip in self.busy:
+                continue  # previous ping still waiting for its timeout
+            self.busy.add(ip)
+            self.pool.submit(self._run, ip)
+
+    def _run(self, ip):
+        try:
+            ms = ping_once(ip)
+        except Exception:  # noqa: BLE001 - a failed ping is just a lost sample
+            ms = None
+        self.busy.discard(ip)
+        self.result.emit(ip, time.time(), ms)
+
+
+class LatencyChart(QWidget):
+    """Latency over time: one line per device, gaps and x marks for lost pings, crosshair on hover."""
+
+    LEFT, RIGHT, TOP, BOTTOM = 56, 120, 14, 44  # bottom holds the "no reply" lane and time labels
+    LANE = 16
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window  # MainWindow: series data, colours and the time span live there
+        self.hover_x = None
+        self.setMouseTracking(True)
+        self.setMinimumHeight(240)
+
+    def leaveEvent(self, _event):
+        self.hover_x = None
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        self.hover_x = event.position().x()
+        self.update()
+
+    def plot_rect(self):
+        return QRectF(self.LEFT, self.TOP, max(10, self.width() - self.LEFT - self.RIGHT),
+                      max(10, self.height() - self.TOP - self.BOTTOM))
+
+    @staticmethod
+    def ticks(top):
+        """Round tick values (1/2/5 steps) from 0 up to at least top."""
+        step = nice_ceiling(top / 5)
+        n = math.ceil(top / step - 1e-9)
+        return [i * step for i in range(n + 1)], n * step
+
+    def paintEvent(self, _event):
+        w = self.window
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        small = QFont(self.font())
+        small.setPointSizeF(max(7.5, small.pointSizeF() * 0.85))
+        p.setFont(small)
+        r = self.plot_rect()
+        now = time.time()
+        span = w.monitor_span()
+        t0 = now - span
+        series = w.visible_series(t0)
+        if not w.monitored:
+            p.setPen(QColor(MUTED))
+            p.drawText(self.rect(), Qt.AlignCenter,
+                       "Right-click a device on the Scan tab → Monitor connection,\nor add an IP address above.")
+            return
+        values = [ms for _ip, _c, _l, samples in series for _t, ms in samples if ms is not None]
+        tick_values, top = self.ticks(max(max(values) * 1.15 if values else 10.0, 2.0))
+        x_of = lambda t: r.left() + (t - t0) / span * r.width()
+        y_of = lambda ms: r.bottom() - ms / top * r.height()
+
+        # recessive grid + axis labels (one y-axis, ms)
+        p.setPen(QPen(QColor(BORDER), 1))
+        for ms in tick_values:
+            y = y_of(ms)
+            p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+            p.setPen(QColor(MUTED))
+            label = f"{ms:g} ms"
+            p.drawText(QRectF(0, y - 8, self.LEFT - 6, 16), Qt.AlignRight | Qt.AlignVCenter, label)
+            p.setPen(QPen(QColor(BORDER), 1))
+        lane_y = r.bottom() + 4 + self.LANE / 2  # lost pings get their own lane, clear of the data
+        p.setPen(QColor(MUTED))
+        p.drawText(QRectF(0, lane_y - 8, self.LEFT - 6, 16), Qt.AlignRight | Qt.AlignVCenter, "no reply")
+        minutes = span / 60
+        for i in range(int(minutes) + 1):
+            if minutes > 5 and i % 5:
+                continue
+            x = x_of(now - i * 60)
+            p.setPen(QColor(MUTED))
+            p.drawText(QRectF(x - 30, r.bottom() + 6 + self.LANE, 60, 18), Qt.AlignHCenter | Qt.AlignTop,
+                       "now" if i == 0 else f"-{i} min")
+
+        # lines (2px, round joins), gaps where pings were lost, x marks at the baseline for them
+        labels = []
+        for _ip, color, label, samples in series:
+            pen = QPen(QColor(color), 2)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            path, drawing = QPainterPath(), False
+            for t, ms in samples:
+                if ms is None:
+                    drawing = False
+                    continue
+                pt = QPointF(x_of(t), y_of(ms))
+                path.lineTo(pt) if drawing else path.moveTo(pt)
+                drawing = True
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
+            p.setPen(QPen(QColor(color), 2))
+            for t, ms in samples:
+                if ms is None:
+                    x, y = x_of(t), lane_y
+                    p.drawLine(QPointF(x - 4, y - 4), QPointF(x + 4, y + 4))
+                    p.drawLine(QPointF(x - 4, y + 4), QPointF(x + 4, y - 4))
+            last = next((s for s in reversed(samples) if s[1] is not None), None)
+            if last:
+                labels.append([y_of(last[1]), color, label])
+        # direct labels at the line ends for up to 4 series (the table is the legend beyond that)
+        if len(series) <= 4:
+            labels.sort()
+            for i in range(1, len(labels)):  # nudge apart so labels don't collide
+                labels[i][0] = max(labels[i][0], labels[i - 1][0] + 15)
+            for y, color, label in labels:
+                p.setBrush(QColor(color))
+                p.setPen(Qt.NoPen)
+                p.drawEllipse(QPointF(r.right() + 10, y), 4, 4)
+                p.setPen(QColor(TEXT))
+                p.drawText(QRectF(r.right() + 18, y - 8, self.RIGHT - 20, 16), Qt.AlignLeft | Qt.AlignVCenter,
+                           p.fontMetrics().elidedText(label, Qt.ElideRight, int(self.RIGHT - 20)))
+
+        # hover: crosshair + tooltip with every series' value at that moment
+        if self.hover_x is not None and r.left() <= self.hover_x <= r.right():
+            t = t0 + (self.hover_x - r.left()) / r.width() * span
+            rows = []
+            for _ip, color, label, samples in series:
+                near = min(samples, key=lambda s: abs(s[0] - t), default=None)
+                if near and abs(near[0] - t) <= max(w.monitor_interval() * 1.5, span / r.width() * 2):
+                    rows.append((color, label, "no reply" if near[1] is None else f"{near[1]:.1f} ms"))
+            p.setPen(QPen(QColor(MUTED), 1, Qt.DashLine))
+            p.drawLine(QPointF(self.hover_x, r.top()), QPointF(self.hover_x, r.bottom()))
+            if rows:
+                fm = p.fontMetrics()
+                head = datetime.datetime.fromtimestamp(t).strftime("%H:%M:%S")
+                width = max([fm.horizontalAdvance(head)] +
+                            [fm.horizontalAdvance(f"{l}  {v}") + 18 for _c, l, v in rows]) + 20
+                height = 22 + 18 * len(rows)
+                bx = self.hover_x + 12 if self.hover_x + 12 + width < self.width() else self.hover_x - 12 - width
+                box = QRectF(bx, r.top() + 6, width, height)
+                p.setPen(QPen(QColor(BORDER), 1))
+                p.setBrush(QColor(RAISED))
+                p.drawRoundedRect(box, 6, 6)
+                p.setPen(QColor(MUTED))
+                p.drawText(QRectF(box.left() + 10, box.top() + 4, width, 16), Qt.AlignLeft, head)
+                for i, (color, label, value) in enumerate(rows):
+                    y = box.top() + 22 + 18 * i
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor(color))
+                    p.drawEllipse(QPointF(box.left() + 14, y + 8), 4, 4)
+                    p.setPen(QColor(TEXT))
+                    p.drawText(QRectF(box.left() + 24, y, width - 30, 16), Qt.AlignLeft | Qt.AlignVCenter,
+                               f"{label}  {value}")
+        p.end()
+
+
+REPORT_CSS = """
+:root { color-scheme: light; --bg:#f3f4f8; --card:#ffffff; --line:#e1e4ec; --text:#1a1d26; --muted:#667086;
+  --accent:#3b6ef0; --warn:#b45309; --warn-bg:#fef3c7; --good:#0c9467; }
+@media (prefers-color-scheme: dark) { :root { color-scheme: dark; --bg:#0e1016; --card:#151823; --line:#262b3b;
+  --text:#e5e7ee; --muted:#8a90a6; --accent:#7aa2ff; --warn:#fbbf24; --warn-bg:#3a2e0b; --good:#34d399; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 26px; margin: 0; } h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); margin: 32px 0 10px; }
+.sub { color: var(--muted); margin: 4px 0 0; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 24px; }
+.tile { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.tile b { display: block; font-size: 26px; } .tile span { color: var(--muted); font-size: 13px; }
+.tile.warn b { color: var(--warn); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 10px 12px;
+  border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; white-space: nowrap; }
+.muted { color: var(--muted); } .warn { color: var(--warn); } .good { color: var(--good); }
+ul.attention { list-style: none; margin: 0; padding: 0; }
+ul.attention li { background: var(--warn-bg); border-radius: 10px; padding: 10px 14px; margin-bottom: 8px; }
+.tag { display: inline-block; border: 1px solid var(--line); border-radius: 10px; padding: 0 8px; font-size: 12px;
+  color: var(--muted); margin-left: 6px; }
+footer { color: var(--muted); font-size: 12px; margin-top: 40px; }
+@media print { body { background: #fff; } .card, .tile { break-inside: avoid; } }
+"""
+
+
+def build_report(data):
+    """Self-contained HTML network report from plain data (see MainWindow.report_data)."""
+    e = lambda x: html.escape(str(x or ""))
+    hosts = data["hosts"]
+    attention = []
+    for h in hosts:
+        who = e(h["label"])
+        for m in h["upnp"]:
+            attention.append(f"⚠ <b>{who}</b> opened internet port {m['external_port']}/{e(m['protocol'])} "
+                             f"to its port {e(m['internal_port'])} via UPnP"
+                             + (f" ({e(m['description'])})" if m["description"] else "") + ".")
+        for p in h["risky"]:
+            attention.append(f"⚠ <b>{who}</b> has {e(port_label(p))} open: {e(port_risk(p))}.")
+        for p in h["ports"] or []:
+            if p.get("cert") and cert_note(p["cert"])[1]:
+                attention.append(f"⚠ <b>{who}</b> port {p['port']}: {e(cert_note(p['cert'])[1])}.")
+        if h["untrusted"]:
+            attention.append(f"<b>{who}</b> isn't marked as trusted.")
+        if h["new"]:
+            attention.append(f"<b>{who}</b> was seen for the first time in this scan.")
+    tiles = [(len(hosts), "devices", False),
+             (sum(len(h["ports"] or []) for h in hosts if not h["this"]), "open ports on other devices", False),
+             (sum(len(h["risky"]) for h in hosts), "risky ports", True),
+             (sum(len(h["upnp"]) for h in hosts), "ports opened to the internet", True),
+             (sum(1 for h in hosts if h["new"]), "new devices", True),
+             (sum(1 for h in hosts if ":" in h["ip"]), "found over IPv6 only", False)]
+    tile_html = "".join(f'<div class="tile{" warn" if warn and n else ""}"><b>{n}</b><span>{label}</span></div>'
+                        for n, label, warn in tiles)
+
+    def ports_cell(h):
+        if h["ports"] is None:
+            return '<span class="muted">not scanned</span>'
+        if not h["ports"]:
+            return '<span class="muted">none open</span>'
+        return ", ".join(f'<span class="warn">⚠ {e(port_label(p))}</span>' if port_risk(p) else
+                         e(port_label(p)) + (f' <span class="muted">“{e(p["title"])}”</span>' if p.get("title") else "")
+                         for p in h["ports"])
+
+    rows = "".join(
+        f"<tr><td class='mono'>{e(h['ip'])}</td><td><b>{e(h['nickname'])}</b>"
+        f"{'<span class=tag>this computer</span>' if h['this'] else ''}"
+        f"{'<span class=tag>new</span>' if h['new'] else ''}</td>"
+        f"<td>{e(h['hostname'])}</td><td>{e(h['type'])}</td><td class='mono'>{e(h['mac'])}</td>"
+        f"<td>{e(h['vendor'])}</td><td>{e(h['identified'])}</td><td>{e(h['os'])}</td><td>{ports_cell(h)}</td></tr>"
+        for h in hosts)
+    me = next((h for h in hosts if h["this"]), None)
+    mine = ""
+    if me and me["all_ports"]:
+        mine = "<h2>This computer's open ports</h2><div class='card'><table><tr><th>Port</th><th>Program</th>" \
+               "<th>Reachable from</th></tr>" + "".join(
+                   f"<tr><td class='mono'>{p['port']}/{e(p['proto'])}</td><td>{e(p.get('program') or p['service'])}</td>"
+                   f"<td class='{'muted' if p.get('local_only') else ''}'>"
+                   f"{'this computer only' if p.get('local_only') else 'your network'}</td></tr>"
+                   for p in me["all_ports"] if not p.get("temporary")) + "</table></div>"
+    notes = "".join(f"<tr><td><b>{e(h['label'])}</b></td><td>{e(h['notes'])}</td></tr>" for h in hosts if h["notes"])
+    upnp = data["upnp"]
+    upnp_line = ("Router UPnP: not checked." if upnp is None else
+                 f"Router UPnP: {len([m for m in upnp['mappings'] if m['enabled']])} port forward(s)"
+                 + (f"; public IP {e(upnp['public_ip'])}." if upnp.get("public_ip") else "."))
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network report</title><style>{REPORT_CSS}</style></head><body><main>
+<h1>Network report: {e(data['network'])}</h1>
+<p class="sub">Scanned {e(data['when'])} from {e(data['scanner'])} · NetScan · {e(upnp_line)}</p>
+<div class="tiles">{tile_html}</div>
+<h2>Needs attention</h2>
+{('<ul class="attention">' + "".join(f"<li>{a}</li>" for a in attention) + "</ul>") if attention
+ else '<p class="good">Nothing flagged: no risky ports, no UPnP internet openings, no new or untrusted devices.</p>'}
+<h2>Devices</h2>
+<div class="card"><table><tr><th>IP address</th><th>Name</th><th>Hostname</th><th>Type</th><th>MAC</th><th>Vendor</th>
+<th>Identified as</th><th>OS</th><th>Open ports</th></tr>{rows}</table></div>
+{mine}
+{('<h2>Notes</h2><div class="card"><table>' + notes + '</table></div>') if notes else ''}
+<footer>Generated by NetScan. Risky-port notes are general guidance: an open port is worth a look, not proof of a problem.</footer>
+</main></body></html>
+"""
+
+
+# ---- internet check ------------------------------------------------------------
+# Only runs when you press a button on the Internet tab; talks to Cloudflare (1.1.1.1).
+SPEED_DOWN_BYTES, SPEED_UP_BYTES = 125_000_000, 40_000_000  # caps; usually less is used
+
+
+def cloudflare_trace():
+    """What Cloudflare sees: {"ip", "loc" (country), "colo" (data centre airport code), ...}."""
+    req = urllib.request.Request("https://1.1.1.1/cdn-cgi/trace", headers={"User-Agent": "NetScan"})
+    body = urllib.request.urlopen(req, timeout=6).read(4096).decode()
+    return dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
+
+
+def dns_servers():
+    """The DNS servers this computer asks."""
+    if IS_WIN:
+        rows = powershell_json("Get-DnsClientServerAddress -AddressFamily IPv4 | "
+                               "Select-Object -ExpandProperty ServerAddresses | ConvertTo-Json -Compress")
+        found = as_list(rows)
+    elif IS_MAC:
+        found = re.findall(r"nameserver\[\d+\]\s*:\s*(\S+)", run_text("/usr/sbin/scutil", "--dns"))
+    else:
+        found = re.findall(r"(?:\s|^)(\d+\.\d+\.\d+\.\d+|[0-9a-f:]+:[0-9a-f:]+)",
+                           run_text("resolvectl", "dns").split(":", 1)[-1]) if shutil.which("resolvectl") else []
+        if not found:
+            try:
+                with open("/etc/resolv.conf") as f:
+                    found = re.findall(r"^nameserver\s+(\S+)", f.read(), re.M)
+            except OSError:
+                found = []
+    return list(dict.fromkeys(str(x) for x in found if x))
+
+
+def dns_lookup_ms(tries=3):
+    """Median time for lookups the DNS server can't have cached (random names that don't exist)."""
+    times = []
+    for _ in range(tries):
+        name = f"netscan-{os.urandom(6).hex()}.example.com"
+        t = time.perf_counter()
+        try:
+            socket.getaddrinfo(name, None)
+        except OSError:
+            pass  # "no such name" is the expected answer; the round trip is what we time
+        times.append((time.perf_counter() - t) * 1000)
+    return sorted(times)[len(times) // 2]
+
+
+def ping_summary(ip, count=5):
+    """(median ms or None, loss %) over a few pings."""
+    results = [ping_once(ip) for _ in range(count)]
+    ok = sorted(r for r in results if r is not None)
+    return (ok[len(ok) // 2] if ok else None), 100 * (count - len(ok)) / count
+
+
+def internet_check(gateway):
+    out = {"when": datetime.datetime.now().strftime("%H:%M:%S")}
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = {"trace": ex.submit(cloudflare_trace), "dns": ex.submit(dns_servers),
+                "dns_ms": ex.submit(dns_lookup_ms), "cf": ex.submit(ping_summary, "1.1.1.1"),
+                "google": ex.submit(ping_summary, "8.8.8.8")}
+        if gateway:
+            futs["router"] = ex.submit(ping_summary, gateway)
+        for key, fut in futs.items():
+            try:
+                out[key] = fut.result()
+            except Exception as e:  # noqa: BLE001 - show what failed, keep the rest
+                out[key] = None
+                out.setdefault("errors", []).append(f"{key}: {e}")
+    return out
+
+
+def _speed_phase(one_request, streams=4, seconds=6.0, cap=None, warmup=0.5):
+    """Run one_request(add_bytes) on several connections until time or data runs out; Mbit/s.
+
+    Bytes from the first `warmup` seconds are ignored: a connection starts slow and ramps up.
+    """
+    lock, state = threading.Lock(), {"total": 0, "counted": 0, "last": None}
+    start = time.perf_counter()
+    deadline = start + seconds
+
+    def add(n):
+        with lock:
+            now = time.perf_counter()
+            state["total"] += n
+            if now - start >= warmup:
+                state["counted"] += n
+                state["last"] = now  # time is measured to the last byte, not to when connections close
+            return now < deadline and (cap is None or state["total"] < cap)
+
+    def stream():
+        while time.perf_counter() < deadline and (cap is None or state["total"] < cap):
+            if not one_request(add):
+                break
+
+    with ThreadPoolExecutor(max_workers=streams) as ex:
+        for f in [ex.submit(stream) for _ in range(streams)]:
+            f.result()
+    elapsed = (state["last"] or time.perf_counter()) - start - warmup
+    return state["counted"] * 8 / max(elapsed, 0.1) / 1e6, state["total"]
+
+
+SPEED_BASE = "https://speed.cloudflare.com"
+
+
+def speed_test(base=SPEED_BASE):
+    """Download then upload through Cloudflare's speed test, 4 connections for ~6 s each; Mbit/s."""
+    ctx = ssl.create_default_context()
+    agent = {"User-Agent": "NetScan"}  # Cloudflare's speed test refuses Python's default user agent
+
+    def download(add):
+        req = urllib.request.Request(f"{base}/__down?bytes=25000000", headers=agent)
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+            while chunk := r.read(65536):
+                if not add(len(chunk)):
+                    return False
+        return True
+
+    block = os.urandom(1_000_000)  # random, so nothing along the way can compress it
+    size = 25_000_000
+
+    class Stop(Exception):
+        """Raised from inside the upload to abort it at the deadline (a short body would just hang)."""
+
+    class Body:
+        """Upload body counted as it's sent (one big upload per connection, like curl), stops at the deadline."""
+
+        def __init__(self, add):
+            self.add, self.sent, self.go = add, 0, True
+
+        def read(self, n=65536):
+            if not self.go:
+                raise Stop
+            if self.sent >= size:
+                return b""
+            start = self.sent % len(block)
+            piece = block[start:start + min(n, size - self.sent, len(block) - start)]
+            self.sent += len(piece)
+            self.go = self.add(len(piece))
+            return piece
+
+    def upload(add):
+        body = Body(add)
+        req = urllib.request.Request(f"{base}/__up", data=body, method="POST",
+                                     headers={"Content-Type": "application/octet-stream",
+                                              "Content-Length": str(size), **agent})
+        try:
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+                r.read()
+        except Stop:
+            return False
+        except (OSError, http.client.HTTPException):
+            if body.go:
+                raise  # a real failure, not us stopping at the deadline
+        return body.go
+
+    down, down_bytes = _speed_phase(download, cap=SPEED_DOWN_BYTES)
+    up, up_bytes = _speed_phase(upload, streams=2, cap=SPEED_UP_BYTES)
+    return {"down": down, "up": up, "used_mb": (down_bytes + up_bytes) / 1e6,
+            "when": datetime.datetime.now().strftime("%H:%M:%S")}
+
+
+class Worker(QObject):
+    """Runs one function in a background thread and emits (tag, result or Exception)."""
+
+    done = Signal(str, object)
+
+    def run(self, tag, fn, *args):
+        def go():
+            try:
+                result = fn(*args)
+            except Exception as e:  # noqa: BLE001 - handed to the GUI to report
+                result = e
+            try:
+                self.done.emit(tag, result)
+            except RuntimeError:
+                pass  # window already closed
+        threading.Thread(target=go, daemon=True).start()
+
+
+def traceroute_argv(target):
+    """Trace-route command that needs no root on each OS, or None if none is installed."""
+    if IS_WIN:
+        return ["tracert", "-d", "-w", "1000", target]
+    if IS_MAC:
+        return ["/usr/sbin/traceroute", "-n", "-w", "1", "-q", "1", target]
+    # stdbuf: these buffer their output when it isn't a terminal, so hops would only show at the end.
+    line = ["stdbuf", "-oL"] if shutil.which("stdbuf") else []
+    if shutil.which("tracepath"):
+        return [*line, "tracepath", "-n", "-m", "30", target]
+    if shutil.which("traceroute"):
+        return [*line, "traceroute", "-n", "-w", "1", "-q", "1", "-m", "30", target]
+    return None
+
+
+class TraceDialog(QDialog):
+    """Runs a trace route and shows each hop as it arrives."""
+
+    def __init__(self, parent, target, label):
+        super().__init__(parent)
+        self.setWindowTitle(f"Trace route to {label}")
+        self.resize(760, 460)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        head = QLabel(f"Every router (hop) between this computer and <b>{html.escape(label)}</b>, with the "
+                      "time each took. A jump in time shows where delay starts; “no reply” hops are "
+                      "common and usually harmless.")
+        head.setWordWrap(True)
+        head.setObjectName("muted")
+        self.out = QPlainTextEdit()
+        self.out.setReadOnly(True)
+        self.out.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        self.stop_btn = QPushButton("Stop")
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self.stop_btn)
+        row.addWidget(close_btn)
+        layout.addWidget(head)
+        layout.addWidget(self.out, 1)
+        layout.addLayout(row)
+        argv = traceroute_argv(target)
+        self.proc = QProcess(self)
+        self.proc.setProcessChannelMode(QProcess.MergedChannels)
+        self.proc.readyReadStandardOutput.connect(self.read)
+        self.proc.finished.connect(lambda *_: (self.stop_btn.setEnabled(False),
+                                               self.out.appendPlainText("\n— finished —")))
+        self.stop_btn.clicked.connect(self.proc.kill)
+        if argv is None:
+            self.out.setPlainText("No trace-route tool found. Install one, e.g. the 'iputils' (tracepath) or "
+                                  "'traceroute' package.")
+            self.stop_btn.setEnabled(False)
+        else:
+            self.out.setPlainText("$ " + " ".join(argv) + "\n")
+            self.proc.start(argv[0], argv[1:])
+
+    def read(self):
+        text = bytes(self.proc.readAllStandardOutput()).decode(errors="replace")
+        self.out.moveCursor(QTextCursor.End)
+        self.out.insertPlainText(text.replace("\r\n", "\n"))
+        self.out.moveCursor(QTextCursor.End)
+
+    def closeEvent(self, event):
+        if self.proc.state() != QProcess.NotRunning:
+            self.proc.kill()
+            self.proc.waitForFinished(1000)
+        super().closeEvent(event)
+
+
+MAP_GROUP_ORDER = ["computer", "pi", "nas", "phone", "media", "iot", "printer", "unknown"]
+
+
+class NetworkMap(QWidget):
+    """Router in the middle, every device around it grouped by type; warnings ringed, hover for details."""
+
+    NODE = 22  # node radius
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        self.nodes = []   # [(ip, QPointF)] from the last paint, for hover/click
+        self.hover = None
+        self.setMouseTracking(True)
+        self.setMinimumHeight(420)
+
+    def node_at(self, pos):
+        return next((ip for ip, pt in self.nodes
+                     if (pt.x() - pos.x()) ** 2 + (pt.y() - pos.y()) ** 2 <= (self.NODE + 4) ** 2), None)
+
+    def mouseMoveEvent(self, event):
+        ip = self.node_at(event.position())
+        if ip != self.hover:
+            self.hover = ip
+            self.setCursor(Qt.PointingHandCursor if ip else Qt.ArrowCursor)
+            self.update()
+        if ip:
+            QToolTip.showText(event.globalPosition().toPoint(), self.window.map_tooltip(ip), self)
+        else:
+            QToolTip.hideText()
+
+    def mousePressEvent(self, event):
+        ip = self.node_at(event.position())
+        if ip:
+            self.window.show_host(ip)
+
+    def paintEvent(self, _event):
+        w = self.window
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        small = QFont(self.font())
+        small.setPointSizeF(max(7.5, small.pointSizeF() * 0.85))
+        self.nodes = []
+        if not w.hosts:
+            p.setPen(QColor(MUTED))
+            p.drawText(self.rect(), Qt.AlignCenter, "Press Find Hosts on the Scan tab to draw the network map.")
+            return
+        gw = w.gateway()
+        others = [ip for ip in w.hosts if ip != gw]
+        kind = {ip: w.devices.device_type(w.hosts[ip], w.ports.get(ip), gw)[0] for ip in others}
+        others.sort(key=lambda ip: (MAP_GROUP_ORDER.index(kind[ip]) if kind[ip] in MAP_GROUP_ORDER else 99,
+                                    ip_sort_key(ip)))
+        legend_h = 26
+        center = QPointF(self.width() / 2, (self.height() - legend_h) / 2)
+        max_r = min(self.width() / 2 - 90, (self.height() - legend_h) / 2 - 40)
+        rings = 1 if len(others) <= 16 else 2
+        placed = {}
+        for i, ip in enumerate(others):
+            angle = -math.pi / 2 + 2 * math.pi * i / max(len(others), 1)
+            radius = max_r * (1.0 if rings == 1 or i % 2 == 0 else 0.62)
+            placed[ip] = QPointF(center.x() + radius * math.cos(angle), center.y() + radius * math.sin(angle))
+        placed[gw or "_net"] = center
+
+        p.setPen(QPen(QColor(BORDER), 1.5))
+        for ip in others:  # links to the router
+            p.drawLine(center, placed[ip])
+        for ip, pt in placed.items():
+            h = w.hosts.get(ip, {"ip": ip, "mac": "", "vendor": "", "hostname": ""})
+            k = "router" if ip == (gw or "_net") else kind.get(ip, "unknown")
+            warn = bool(risky(w.network_ports(ip)) or h.get("upnp"))
+            me = ip == w.local_ip()
+            new = h.get("mac") in w.new_devices
+            ring = AMBER if warn else ACCENT if me else BORDER_HI
+            r = self.NODE + (4 if ip == self.hover else 0) + (6 if k == "router" else 0)
+            p.setPen(QPen(QColor(ring), 3 if warn or me else 1.5))
+            p.setBrush(QColor(HOVER if ip == self.hover else RAISED))
+            p.drawEllipse(pt, r, r)
+            icon = w.type_icon(k).pixmap(24 if k == "router" else 20, 24 if k == "router" else 20)
+            p.drawPixmap(QPointF(pt.x() - icon.width() / 2, pt.y() - icon.height() / 2), icon)
+            if new:  # small green dot: first time seen
+                p.setPen(QPen(QColor(SURFACE), 2))
+                p.setBrush(QColor(GREEN))
+                p.drawEllipse(QPointF(pt.x() + r * 0.72, pt.y() - r * 0.72), 5, 5)
+            if ip == "_net":
+                continue
+            label = w.monitor_label(ip)
+            p.setFont(small)
+            fm = p.fontMetrics()
+            p.setPen(QColor(TEXT))
+            name = fm.elidedText(label, Qt.ElideRight, 130)
+            p.drawText(QRectF(pt.x() - 70, pt.y() + r + 3, 140, 16), Qt.AlignHCenter | Qt.AlignTop, name)
+            if label != ip:
+                p.setPen(QColor(MUTED))
+                p.drawText(QRectF(pt.x() - 70, pt.y() + r + 17, 140, 16), Qt.AlignHCenter | Qt.AlignTop,
+                           fm.elidedText(ip, Qt.ElideMiddle, 130))
+            self.nodes.append((ip, pt))
+
+        # legend: what the rings and dot mean (never colour alone: the tooltip spells it out too)
+        p.setFont(small)
+        x, y = 12.0, self.height() - legend_h / 2
+        for color, text, dot in ((AMBER, "risky port or opened to the internet", False),
+                                 (ACCENT, "this computer", False), (GREEN, "new device", True)):
+            p.setPen(QPen(QColor(color), 3) if not dot else Qt.NoPen)
+            p.setBrush(QColor(color) if dot else Qt.NoBrush)
+            p.drawEllipse(QPointF(x + 6, y), 5 if dot else 6, 5 if dot else 6)
+            p.setPen(QColor(MUTED))
+            p.drawText(QPointF(x + 18, y + 4), text)
+            x += 30 + p.fontMetrics().horizontalAdvance(text)
+        p.end()
+
+
+class SsdpListener(QObject):
+    """Listens for UPnP devices' own multicast announcements (NOTIFY) while NetScan is open.
+
+    Firewalls like ufw drop the direct replies to an SSDP search but let these multicast
+    announcements through, and routers repeat them every minute or so.
+    """
+
+    found = Signal(str, str)  # ip, description URL
+
+    def __init__(self):
+        super().__init__()
+        self.seen = {}  # ip -> set of URLs (read from the GUI thread; only ever grows)
+        self.local_ip = None
+
+    def start(self, local_ip):
+        if self.local_ip == local_ip:
+            return
+        self.local_ip = local_ip
+        threading.Thread(target=self._run, args=(local_ip,), daemon=True).start()
+
+    def _run(self, local_ip):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_REUSEPORT"):
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            s.bind(("", SSDP_ADDR[1]))
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                         socket.inet_aton(SSDP_ADDR[0]) + socket.inet_aton(local_ip))
+        except OSError:
+            return  # port 1900 not shareable here (e.g. Windows' own SSDP service); searches still work
+        s.settimeout(2)
+        while self.local_ip == local_ip:
+            try:
+                data, (ip, _port) = s.recvfrom(9000)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            m = re.search(rb"(?im)^location:\s*(\S+)", data)
+            if m and data.startswith((b"NOTIFY", b"HTTP/")):
+                url = m.group(1).decode(errors="replace")
+                if url not in self.seen.setdefault(ip, set()):
+                    self.seen[ip].add(url)
+                    self.found.emit(ip, url)
+        s.close()
+
+
+class Discovery(QObject):
+    done = Signal(object)
+
+    def start(self, job):
+        threading.Thread(target=self._run, args=(job,), daemon=True).start()
+
+    def _run(self, job):
+        try:
+            result = run_discovery(job)
+        except RuntimeError:
+            return  # NetScan is closing: Python won't start new worker threads during exit
+        self.done.emit(result)
 
 
 class Resolver(QObject):
@@ -1598,6 +2904,15 @@ class MainWindow(QMainWindow):
         self.online_macs = set()  # seen in the latest scan or watch check
         self.history_path = None  # this scan's file in the history folder
         self.router_proc = None
+        self.upnp = None          # router's UPnP answer: public IP and port forwards
+        self.scan_token = 0       # discovery results from an older scan are ignored
+        self.discovering = False
+        self.disc_summary = ""
+        self.discovery = Discovery()
+        self.discovery.done.connect(self.apply_discovery)
+        self.ssdp_listener = SsdpListener()
+        self.ssdp_listener.found.connect(self.ssdp_announced)
+        self.upnp_pending = False
         self._icons = {}
         self.watch_proc = None
         self.networks = []
@@ -1733,6 +3048,7 @@ class MainWindow(QMainWindow):
         rename.triggered.connect(self.rename_selected)
         self.table.addAction(rename)
         self.table.setColumnHidden(COL_OS, True)
+        self.table.setColumnHidden(COL_INFO, True)
 
         hosts_card, hl, hh = make_card("Hosts")
         hh.addWidget(self.count_label)
@@ -1787,6 +3103,7 @@ class MainWindow(QMainWindow):
         self.export_btn.setObjectName("menuButton")
         export_menu = QMenu(self.export_btn)
         export_menu.addAction("Save scan (JSON, for Compare)…", self.save_json)
+        export_menu.addAction("Network report (HTML)…", self.export_report)
         export_menu.addAction("Export CSV…", self.export_csv)
         export_menu.addAction("Export last nmap output (XML)…", self.export_xml)
         self.export_btn.setMenu(export_menu)
@@ -1817,6 +3134,12 @@ class MainWindow(QMainWindow):
         self.tabbar.setExpanding(False)
         self.tabbar.addTab("Scan")
         self.tabbar.addTab("Devices && Wake-on-LAN")
+        self.tabbar.addTab("Monitor")
+        self.tabbar.setTabToolTip(2, "Ping devices over time: latency, jitter and packet loss (Ctrl+3)")
+        self.tabbar.addTab("Internet")
+        self.tabbar.setTabToolTip(3, "Public IP, VPN check, DNS, latency and a speed test (Ctrl+4)")
+        self.tabbar.addTab("Map")
+        self.tabbar.setTabToolTip(4, "Every device around your router, grouped by type (Ctrl+5)")
         self.tabbar.setTabToolTip(0, "Find hosts and scan ports (Ctrl+1)")
         self.tabbar.setTabToolTip(1, "Every device NetScan has seen: nicknames, wake, watch (Ctrl+2)")
         segment = QFrame()
@@ -1864,6 +3187,12 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.pages.addWidget(scan_page)
         self.pages.addWidget(self.build_devices_page())
+        self.pages.addWidget(self.build_monitor_page())
+        self.pages.addWidget(self.build_internet_page())
+        map_card, ml, _ = make_card("Network map")
+        self.net_map = NetworkMap(self)
+        ml.addWidget(self.net_map, 1)
+        self.pages.addWidget(map_card)
         self.tabbar.currentChanged.connect(self.switch_page)
 
         body.addLayout(head)
@@ -1887,7 +3216,10 @@ class MainWindow(QMainWindow):
 
         for keys, slot in (("F5", self.shortcut_scan), (QKeySequence.Find, self.focus_filter),
                            ("Ctrl+1", lambda: self.tabbar.setCurrentIndex(0)),
-                           ("Ctrl+2", lambda: self.tabbar.setCurrentIndex(1))):
+                           ("Ctrl+2", lambda: self.tabbar.setCurrentIndex(1)),
+                           ("Ctrl+3", lambda: self.tabbar.setCurrentIndex(2)),
+                           ("Ctrl+4", lambda: self.tabbar.setCurrentIndex(3)),
+                           ("Ctrl+5", lambda: self.tabbar.setCurrentIndex(4))):
             act = QAction(self)
             act.setShortcut(QKeySequence(keys))
             act.triggered.connect(slot)
@@ -1928,6 +3260,8 @@ class MainWindow(QMainWindow):
         self.os_box.setChecked(b("os", False))
         self.watch_combo.setCurrentIndex(min(s.value("watch", 0, type=int), len(WATCH_INTERVALS) - 1))
         self.watch_ports_box.setChecked(b("watch_ports", False))
+        self.mon_interval.setCurrentIndex(min(s.value("monitor_interval", 0, type=int), self.mon_interval.count() - 1))
+        self.mon_span.setCurrentIndex(min(s.value("monitor_span", 0, type=int), self.mon_span.count() - 1))
         if s.contains("dev_split"):
             self.dev_split.restoreState(s.value("dev_split"))
         self.udp_box.setChecked(b("udp", False))
@@ -1949,6 +3283,8 @@ class MainWindow(QMainWindow):
         s.setValue("os", self.os_box.isChecked())
         s.setValue("watch", self.watch_combo.currentIndex())
         s.setValue("watch_ports", self.watch_ports_box.isChecked())
+        s.setValue("monitor_interval", self.mon_interval.currentIndex())
+        s.setValue("monitor_span", self.mon_span.currentIndex())
         s.setValue("theme", self.theme_mode)
         s.setValue("dev_split", self.dev_split.saveState())
         s.setValue("udp", self.udp_box.isChecked())
@@ -1963,6 +3299,8 @@ class MainWindow(QMainWindow):
     def populate_networks(self):
         self.target.clear()
         self.networks = detect_networks()
+        if self.networks and hasattr(self, "ssdp_listener"):
+            self.ssdp_listener.start(self.networks[0]["local_ip"])
         for n in self.networks:
             self.target.addItem(
                 f"{n['network']}  ({n['iface']}, you are {n['local_ip']})", n)
@@ -2094,6 +3432,7 @@ class MainWindow(QMainWindow):
         self.set_dot(ACCENT if self.is_running() else GREEN)
         self.show_port_details()
         self.refresh_devices()
+        self.refresh_monitor()
 
     def set_dot(self, color):
         self.status_dot.setStyleSheet(f"color: {color};")
@@ -2170,6 +3509,10 @@ class MainWindow(QMainWindow):
         self.ip_items = {}
         self.table.setColumnHidden(COL_CHANGE, True)
         self.table.setColumnHidden(COL_OS, True)
+        self.table.setColumnHidden(COL_INFO, True)
+        self.scan_token += 1
+        self.upnp = None
+        self.disc_summary = ""
         self.new_devices = set()
         self.hosts = {}
         self.ports = {}
@@ -2241,8 +3584,10 @@ class MainWindow(QMainWindow):
             if self.current:
                 self.online_macs = {h["mac"] for h in self.hosts.values() if h["mac"]}
             for ip, h in self.hosts.items():
-                if not h["hostname"] and self.devices.get(h).get("hostname"):
-                    h["hostname"] = self.devices.get(h)["hostname"]  # e.g. learned from the router
+                rec = self.devices.get(h)
+                for key in ("hostname",) + DISCOVERY_FIELDS:  # remembered names, models, services
+                    if not h.get(key) and rec.get(key):
+                        h[key] = rec[key]
                 self.refresh_row(ip)  # MACs, trust and device types are settled now
             self.history_path = save_history(self.scan_record()) if self.hosts else None
             self.refresh_devices()
@@ -2278,9 +3623,13 @@ class MainWindow(QMainWindow):
         if self.new_devices:
             self.summary += f" {len(self.new_devices)} device(s) never seen before."
         self.update_status()
+        if self.current:
+            self.start_discovery(names=True, ips=list(self.hosts))
 
     def update_status(self):
         extra = f" Looking up {len(self.pending)} name(s)…" if self.pending else ""
+        if self.discovering:
+            extra += " Identifying devices (names, UPnP, IPv6, web pages)…"
         self.status.setText(self.summary + extra)
 
     # ---- table helpers -----------------------------------------------------
@@ -2320,6 +3669,12 @@ class MainWindow(QMainWindow):
         self.table.item(row, COL_OS).setText(h.get("os", ""))
         if h.get("os"):
             self.table.setColumnHidden(COL_OS, False)
+        info_text, info_tip = self.identified(h, self.ports.get(ip))
+        info = self.table.item(row, COL_INFO)
+        info.setText(info_text)
+        info.setToolTip(info_tip)
+        if info_text:
+            self.table.setColumnHidden(COL_INFO, False)
         self.table.item(row, COL_MAC).setText(h["mac"])
         vendor = self.table.item(row, COL_VENDOR)
         vendor.setText(h["vendor"])
@@ -2334,10 +3689,218 @@ class MainWindow(QMainWindow):
             local_only = sum(1 for p in self.ports[ip] if p.get("local_only") and not p.get("temporary"))
             text = (summarize_ports(reachable) if reachable else "none reachable from the network") \
                 + (f"  · +{local_only} local-only" if local_only else "")
-        ports.setText(("⚠ " if bad else "") + text)
-        ports.setForeground(QColor(AMBER if bad else GREEN if reachable else MUTED))
-        ports.setToolTip("\n".join(f"{port_label(p)}: {port_risk(p)}" for p in bad))
+        exposed = h.get("upnp") or []
+        if exposed:  # ports a device opened to the internet through the router's UPnP
+            text = "open to the internet: " + ", ".join(
+                f"{m['external_port']}/{m['protocol']}" for m in exposed) + ("  · " + text if text else "")
+        if ":" in ip and ip not in self.ports:
+            text = "found over IPv6 only"
+        ports.setText(("⚠ " if bad or exposed else "") + text)
+        ports.setForeground(QColor(AMBER if bad or exposed else GREEN if reachable else MUTED))
+        ports.setToolTip("\n".join(
+            [f"Internet port {m['external_port']}/{m['protocol']} → {ip}:{m['internal_port']}"
+             f"{' (' + m['description'] + ')' if m['description'] else ''}, opened via UPnP" for m in exposed]
+            + [f"{port_label(p)}: {port_risk(p)}" for p in bad]))
         self.apply_filter_row(row)
+
+    @staticmethod
+    def identified(h, ports=None):
+        """(short text, tooltip) of what a device says it is: announced name/model, web page, services."""
+        name = (h.get("hostname") or "").lower()
+        services = [x for x in h.get("services") or [] if x.lower() != name]
+        titles = [f"{p['port']}: {p['title']}" for p in ports or [] if p.get("title")]
+        real_titles = [t for t in titles if not re.match(r"\d+: (HTTP )?\d{3}\b", t)]
+        model = " ".join(x for x in (h.get("maker"), h.get("model")) if x and x not in (h.get("friendly") or ""))
+        text = h.get("friendly") or (services[0] if services else "") or model \
+            or (real_titles[0].split(": ", 1)[1] if real_titles else "")
+        tip = [line for line in (
+            f"Model: {model}" if model else "", f"Announced name: {h['friendly']}" if h.get("friendly") else "",
+            "Services: " + ", ".join(services) if services else "",
+            "Web pages: " + "; ".join(titles) if titles else "",
+            "IPv6: " + ", ".join(h["ipv6"]) if h.get("ipv6") else "") if line]
+        return text, "\n".join(tip)
+
+    def start_discovery(self, names, ips, sweep=False):
+        """Background, read-only extras: mDNS/SSDP names, IPv6 neighbours, router UPnP, web page titles."""
+        net = self.current
+        reachable = [(ip, p) for ip in ips if ":" not in ip for p in self.ports.get(ip) or []
+                     if not p.get("local_only") and not p.get("temporary")]
+        web = [(ip, p["port"]) for ip, p in reachable if is_web_port(p) and not p.get("title")]
+        tls = [(ip, p["port"]) for ip, p in reachable if is_tls_port(p) and "cert" not in p]
+        if not names and not web and not tls:
+            return
+        if self.discovering:
+            return  # one at a time; the running one reports soon
+        gw = self.gateway()
+        router = self.hosts.get(gw, {})
+        rec = self.devices.get(router) if router else {}
+        job = {"token": self.scan_token, "net": net, "gateway": gw if names else None, "web": web, "tls": tls,
+               "what": {"names"} if names else set(),
+               "upnp_urls": [rec["upnp_url"]] if rec.get("upnp_url") else [],
+               "announced": {ip: sorted(urls) for ip, urls in list(self.ssdp_listener.seen.items())},
+               "nmap": self.nmap if sweep else None,
+               "upnp_ports": list(dict.fromkeys(p["port"] for p in (self.ports.get(gw) or []) + (rec.get("ports") or [])
+                                                if p["proto"] == "tcp"))}
+        self.discovering = True
+        self.update_status()
+        self.discovery.start(job)
+
+    def ssdp_announced(self, ip, url):
+        """A UPnP device announced itself; if it's our router and we don't know its UPnP yet, check it now."""
+        if ip != self.gateway() or self.upnp or self.is_running():
+            return
+        if self.discovering:
+            self.upnp_pending = True  # check once the running discovery finishes
+            return
+        self.start_discovery(names=True, ips=[])
+
+    def check_upnp(self):
+        """Ask the router which ports devices opened to the internet; search its ports if needed."""
+        router = self.hosts.get(self.gateway(), {})
+        known = self.devices.get(router).get("upnp_url") if router else None
+        self.summary = ("Checking the router's UPnP port forwards…" if known else
+                        "Searching the router's ports for its UPnP service (about a minute)…")
+        self.start_discovery(names=True, ips=[], sweep=True)  # sweeps only if the quick checks fail
+
+    def apply_discovery(self, res):
+        if res["token"] != self.scan_token:
+            return  # a newer scan has started since
+        self.discovering = False
+        notes, touched = [], set()
+        # Devices first (IPv6 neighbours, mDNS/SSDP responders the scan missed), then what they announce.
+        added = self.apply_ipv6(res.get("ipv6", {}))
+        for ip in list(res.get("mdns", {})) + list(res.get("upnp_devices", {})):
+            added += self.add_found_host(ip)
+        if added:
+            notes.append(f"{added} more device(s) found by IPv6/mDNS/UPnP that the scan missed.")
+        for ip, d in res.get("mdns", {}).items():
+            h = self.hosts.get(ip)
+            if not h:
+                continue
+            h["hostname"] = h["hostname"] or d["name"]
+            h["services"], h["svc_types"] = d["services"], d["types"]
+            h["model"] = h.get("model") or d["model"]
+            h["friendly"] = d["friendly"] or h.get("friendly", "")
+            touched.add(ip)
+        for ip, info in res.get("upnp_devices", {}).items():
+            h = self.hosts.get(ip)
+            if not h:
+                continue
+            h["friendly"] = h.get("friendly") or info["friendly"]
+            h["model"] = h.get("model") or " ".join(x for x in (info["model"], info["model_number"]) if x)
+            h["maker"] = h.get("maker") or info["manufacturer"]
+            h["upnp_type"] = info["device_type"]
+            touched.add(ip)
+        for (ip, port), cert in res.get("certs", {}).items():
+            for p in self.ports.get(ip) or []:
+                if p["port"] == port and p["proto"] == "tcp":
+                    p["cert"] = cert
+                    touched.add(ip)
+        for (ip, port), title in res.get("titles", {}).items():
+            for p in self.ports.get(ip) or []:
+                if p["port"] == port and p["proto"] == "tcp":
+                    p["title"] = title
+                    touched.add(ip)
+        if "upnp" in res:
+            self.upnp = res["upnp"]
+            for h in self.hosts.values():
+                h.pop("upnp", None)
+            if self.upnp:
+                gw = self.gateway()
+                if gw in self.hosts:
+                    self.devices.update(self.hosts[gw], upnp_url=self.upnp["url"])
+                for m in self.upnp["mappings"]:
+                    if m["client"] in self.hosts and m["enabled"]:
+                        self.hosts[m["client"]].setdefault("upnp", []).append(m)
+                        touched.add(m["client"])
+                n = sum(1 for m in self.upnp["mappings"] if m["enabled"])
+                notes.append(f"Router UPnP: {n} port(s) opened to the internet by devices." if n
+                             else "Router UPnP: no ports opened to the internet.")
+            else:
+                hint = ""
+                if not res.get("ssdp") and ufw_active():
+                    lan = str(self.current["network"])
+                    hint = (" Your firewall (ufw) blocks UPnP discovery replies; to allow them: "
+                            f"sudo ufw allow proto udp from {lan} port 1900")
+                heard = bool(self.ssdp_listener.seen)
+                notes.append("Router UPnP: not found yet. NetScan listens for the router's own announcement "
+                             "(usually within a minute) and checks automatically"
+                             + ("" if heard else "; or right-click the router → Check internet port forwards")
+                             + "." + hint)
+        with self.devices.batch():
+            for ip in touched:
+                h = self.hosts[ip]
+                if h["mac"]:
+                    self.devices.update(h, **{k: h[k] for k in DISCOVERY_FIELDS + ("hostname",) if h.get(k)})
+        for ip in touched:
+            self.refresh_row(ip)
+        self.table.resizeColumnsToContents()
+        self.disc_summary = " ".join(notes)
+        if notes:
+            # replace an earlier discovery note rather than piling them up
+            self.summary = re.sub(r" (\d+ more device\(s\) found|Router UPnP:).*$", "", self.summary.rstrip())
+            self.summary += " " + self.disc_summary
+        if self.upnp_pending and not self.upnp:
+            self.upnp_pending = False
+            QTimer.singleShot(0, lambda: self.start_discovery(names=True, ips=[]))
+        self.show_port_details()
+        self.refresh_devices()
+        self.net_map.update()
+        self.update_status()
+
+    def add_found_host(self, ip, mac=None, ipv6=None):
+        """Add a device another discovery method found on this network (1 if added, else 0)."""
+        net = self.current
+        if not net or ip in self.hosts or ip == net["local_ip"]:
+            return 0
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return 0
+        if addr.version == 4 and addr not in net["network"]:
+            return 0  # e.g. a device's second interface on another subnet
+        if mac is None:
+            mac = neighbour_macs(net["iface"]).get(ip, "")
+        if mac and any(h["mac"] == mac for h in self.hosts.values()):
+            return 0  # already listed under another address
+        h = {"ip": ip, "hostname": "", "mac": mac, "vendor": mac_vendor(mac), "os": ""}
+        if ipv6:
+            h["ipv6"] = ipv6
+        rec = self.devices.get(h) if mac else {}
+        for key in ("hostname",) + DISCOVERY_FIELDS:
+            if not h.get(key) and rec.get(key):
+                h[key] = rec[key]
+        self.table.setSortingEnabled(False)
+        self.hosts[ip] = h
+        self.add_row(h)
+        self.table.setSortingEnabled(True)
+        if mac:
+            first_run = not self.devices.known_macs()
+            new = self.devices.record([h], checked=False)
+            self.online_macs.add(mac)
+            if new and not first_run:
+                self.new_devices.add(mac)
+                self.set_change(self.row_for_ip(ip), "NEW DEVICE")
+        return 1
+
+    def apply_ipv6(self, neighbours):
+        """Note devices' IPv6 addresses; add devices that only answered over IPv6. Returns how many were added."""
+        if not neighbours or not self.current:
+            return 0
+        net = self.current
+        arp = {mac: ip for ip, mac in neighbour_macs(net["iface"]).items()}
+        by_mac = {h["mac"]: h for h in self.hosts.values() if h["mac"]}
+        added = 0
+        for mac, addrs in neighbours.items():
+            if mac == net["mac"]:
+                continue
+            if mac in by_mac:
+                by_mac[mac]["ipv6"] = addrs
+                continue
+            v4 = arp.get(mac)  # it may have an IPv4 address the scan missed
+            inside = v4 and ipaddress.ip_address(v4) in net["network"] and v4 not in self.hosts
+            added += self.add_found_host(v4 if inside else addrs[0], mac, addrs)
+        return added
 
     def gateway(self):
         return self.current.get("gateway") if self.current else None
@@ -2436,7 +3999,12 @@ class MainWindow(QMainWindow):
         if args is None:
             return
         me = self.local_ip()
-        others = [ip for ip in ips if ip != me]
+        v6_only = [ip for ip in ips if ":" in ip]
+        others = [ip for ip in ips if ip != me and ":" not in ip]
+        if v6_only and not others and me not in ips:
+            self.status.setText("Devices found only over IPv6 can't be port-scanned yet; "
+                                "they didn't answer on IPv4.")
+            return
         if not others:  # only this computer: read its ports from the OS, no nmap needed
             self.apply_local_ports()
             self.show_port_details()
@@ -2518,6 +4086,8 @@ class MainWindow(QMainWindow):
             save_history(self.scan_record(), self.history_path)
         self.refresh_devices()
         self.update_status()
+        if self.current:
+            self.start_discovery(names=False, ips=self.scan_ips)
 
     # ---- this computer ------------------------------------------------------
 
@@ -2592,9 +4162,24 @@ class MainWindow(QMainWindow):
         h = self.hosts.get(ip, {})
         kind = self.devices.device_type(h, self.ports.get(ip), self.gateway())[0] if h else "unknown"
         who = " · ".join(x for x in (self.devices.nickname(h) if h else "", ip, DEVICE_TYPES[kind],
-                                     h.get("os", "")) if x)
+                                     h.get("os", ""), self.identified(h, self.ports.get(ip))[0]) if x)
+        if ip == self.gateway() and self.upnp and self.upnp.get("public_ip"):
+            who += f" · public IP {self.upnp['public_ip']}"
+        self.details_label.setToolTip("IPv6: " + ", ".join(h["ipv6"]) if h.get("ipv6") else "")
+        for m in h.get("upnp") or []:  # ports this device opened to the internet via UPnP
+            row = self.details.rowCount()
+            self.details.insertRow(row)
+            cells = [str(m["internal_port"]), m["protocol"], m["description"] or "(no description)",
+                     f"internet port {m['external_port']}",
+                     "⚠ Opened to the internet by this device via UPnP"]
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setForeground(QColor(AMBER))
+                self.details.setItem(row, col, item)
         if ip not in self.ports:
-            self.details_label.setText(f"{who}: not port-scanned yet.")
+            self.details_label.setText(f"{who}: " + ("found over IPv6 only; no IPv4 address to scan."
+                                                     if ":" in ip else "not port-scanned yet."))
+            self.details.resizeColumnsToContents()
             return
         ports = self.ports[ip]
         local = ip == self.local_ip()
@@ -2614,9 +4199,11 @@ class MainWindow(QMainWindow):
             self.details.setItem(row, 0, port_item)
             self.details.setItem(row, 1, QTableWidgetItem(p["proto"]))
             self.details.setItem(row, 2, QTableWidgetItem(p["service"]))
-            self.details.setItem(row, 3, QTableWidgetItem(p["version"]))
-            if port_risk(p):
-                note = QTableWidgetItem("⚠ " + port_risk(p))
+            cert_text, cert_warn = cert_note(p["cert"]) if p.get("cert") else ("", "")
+            version = " · ".join(x for x in (p["version"], f"“{p['title']}”" if p.get("title") else "", cert_text) if x)
+            self.details.setItem(row, 3, QTableWidgetItem(version))
+            if port_risk(p) or cert_warn:
+                note = QTableWidgetItem("⚠ " + (port_risk(p) or cert_warn))
                 note.setForeground(QColor(AMBER))
             elif local:
                 note = QTableWidgetItem("Temporary socket for the program's own traffic" if p.get("temporary")
@@ -2644,6 +4231,10 @@ class MainWindow(QMainWindow):
         scan = menu.addAction(f"Scan ports on {'this host' if len(ips) == 1 else f'{len(ips)} hosts'}",
                               lambda: self.start_port_scan(ips))
         scan.setEnabled(not self.is_running())
+        v4 = [ip for ip in ips if ":" not in ip]
+        if v4:
+            menu.addAction("Monitor connection" + (f" ({len(v4)} devices)" if len(v4) > 1 else ""),
+                           lambda: self.monitor_hosts(v4))
         if len(ips) == 1:
             ip = ips[0]
             h = self.hosts[ip]
@@ -2657,6 +4248,9 @@ class MainWindow(QMainWindow):
                 menu.addAction("Wake-on-LAN", lambda: self.wake(h["mac"], self.devices.nickname(h)
                                                                   or h["hostname"] or ip))
             menu.addSeparator()
+            if ":" in ip:  # found only over IPv6: no IPv4 address to open/ssh/ping
+                menu.exec(self.table.viewport().mapToGlobal(pos))
+                return
             open_ports = {p["port"] for p in self.ports.get(ip, []) if p["proto"] == "tcp"}
             if open_ports & {139, 445}:
                 menu.addAction("Open file share (SMB)", lambda: self.open_service("smb", ip))
@@ -2668,6 +4262,8 @@ class MainWindow(QMainWindow):
             if 22 in open_ports:
                 menu.addAction("Copy ssh command", lambda: self.copy_ssh(h))
             if ip == self.gateway():
+                chk = menu.addAction("Check internet port forwards (UPnP)", self.check_upnp)
+                chk.setEnabled(not self.discovering)
                 act = menu.addAction("Get device names from router (SSH)", lambda: self.fetch_router_names(h))
                 act.setEnabled(not (self.router_proc and self.router_proc.state() != QProcess.NotRunning))
             web = next(((port, scheme) for port, scheme in WEB_PORTS if port in open_ports), None)
@@ -2679,6 +4275,7 @@ class MainWindow(QMainWindow):
             else:
                 menu.addAction(f"Open http://{ip}",
                                lambda: QDesktopServices.openUrl(QUrl(f"http://{ip}")))
+            menu.addAction(f"Trace route to {ip}", lambda: self.trace_route(ip, self.monitor_label(ip)))
             ping = terminal_argv(["ping", ip])
             if ping:
                 if 22 in open_ports or ip not in self.ports:
@@ -2801,6 +4398,12 @@ class MainWindow(QMainWindow):
             QGuiApplication.clipboard().setText(f"ssh {target}")
             self.status.setText(f"Copied: ssh {target}")
 
+    def trace_route(self, target, label=None):
+        dlg = TraceDialog(self, target, label or target)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.show()
+        return dlg
+
     def open_service(self, kind, ip, port=None):
         """Open a file share, RDP or VNC session with whatever app this system has for it."""
         argv, url = None, None
@@ -2900,9 +4503,13 @@ class MainWindow(QMainWindow):
             w.setVisible(index == 0)
         if index == 1:
             self.refresh_devices()
+        if index == 2:
+            self.refresh_monitor()
+        if index == 4:
+            self.net_map.update()
 
     def focus_filter(self):
-        edit = self.filter_edit if self.tabbar.currentIndex() == 0 else self.dev_filter
+        edit = self.dev_filter if self.tabbar.currentIndex() == 1 else self.filter_edit
         edit.setFocus()
         edit.selectAll()
 
@@ -2997,6 +4604,12 @@ class MainWindow(QMainWindow):
         self.dev_forget_btn.setToolTip("Remove from the list; it will count as new if seen again")
         self.dev_forget_btn.clicked.connect(self.forget_devices)
 
+        export_btn = QPushButton("Export…")
+        export_btn.setToolTip("Save the device list (names, notes, trusted, history) to a file")
+        export_btn.clicked.connect(self.export_devices)
+        import_btn = QPushButton("Import…")
+        import_btn.setToolTip("Merge a device list exported from NetScan on another computer")
+        import_btn.clicked.connect(self.import_devices)
         known, kl, kh = make_card("Known devices")
         kh.addWidget(self.dev_count)
         kh.addStretch(1)
@@ -3007,6 +4620,9 @@ class MainWindow(QMainWindow):
         row.addWidget(self.dev_wake_btn)
         row.addWidget(self.dev_rename_btn)
         row.addWidget(self.dev_forget_btn)
+        row.addSpacing(12)
+        row.addWidget(export_btn)
+        row.addWidget(import_btn)
         row.addStretch(1)
         tip = QLabel("Double-click to rename")
         tip.setObjectName("muted")
@@ -3085,7 +4701,8 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(6)
         self.detail_fields = {}
-        for i, name in enumerate(("First seen", "Last seen", "IP addresses", "OS", "Open ports")):
+        for i, name in enumerate(("First seen", "Last seen", "IP addresses", "IPv6", "Identified as", "OS",
+                                  "Open ports")):
             value = QLabel()
             value.setWordWrap(True)
             value.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -3187,6 +4804,10 @@ class MainWindow(QMainWindow):
         f["IP addresses"].setText(ips[0] + (f'<br><span style="color:{MUTED}">before: '
                                             + ", ".join(ips[1:]) + "</span>" if len(ips) > 1 else ""))
         f["OS"].setText(d.get("os") or f'<span style="color:{MUTED}">not detected yet</span>')
+        f["IPv6"].setText(", ".join(d.get("ipv6") or []) or f'<span style="color:{MUTED}">none seen</span>')
+        ident, tip = self.identified(d, d.get("ports"))
+        f["Identified as"].setText(html.escape(ident) or f'<span style="color:{MUTED}">nothing announced</span>')
+        f["Identified as"].setToolTip(tip)
         if not (same and self.detail_ssh.hasFocus()):
             self.detail_ssh.setText(d.get("ssh_user", ""))
         ports = d.get("ports")
@@ -3373,6 +4994,36 @@ class MainWindow(QMainWindow):
             return
         self.wake(mac, self.device_label(mac))
 
+    def export_devices(self):
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d")
+        path, _ = QFileDialog.getSaveFileName(self, "Export device list", f"netscan-devices_{stamp}.json",
+                                              "NetScan device list (*.json)")
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"netscan_devices": 1, "exported": now_iso(), "devices": self.devices.devices}, f, indent=1)
+        self.status.setText(f"Exported {len(self.devices.devices)} device(s) to {path}")
+
+    def import_devices(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import device list", "", "NetScan device list (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            devices = data["devices"]
+            if not isinstance(devices, dict):
+                raise TypeError("'devices' isn't a list of devices")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            QMessageBox.warning(self, "NetScan", f"That isn't a NetScan device list:\n{e}")
+            return
+        added, updated = self.devices.merge_from(devices)
+        for ip in self.hosts:
+            self.refresh_row(ip)
+        self.refresh_devices()
+        self.status.setText(f"Imported {path}: {added} new device(s), filled in details for {updated}. "
+                            "Existing names and notes were kept.")
+
     def rename_device(self):
         macs = self.selected_device_macs()
         if len(macs) != 1:
@@ -3430,6 +5081,398 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("Forget", self.forget_devices)
         menu.exec(self.dev_table.viewport().mapToGlobal(pos))
+
+    # ---- connection monitor --------------------------------------------------
+
+    def build_monitor_page(self):
+        self.monitored = {}  # ip -> {"slot", "label", "samples": deque[(time, ms or None)]}
+        self.pinger = Pinger()
+        self.pinger.result.connect(self.monitor_result)
+        self.mon_timer = QTimer(self)
+        self.mon_timer.timeout.connect(self.monitor_tick)
+
+        self.mon_add = QLineEdit()
+        self.mon_add.setPlaceholderText("Add an IP address or hostname, e.g. 192.168.1.1 or 1.1.1.1")
+        self.mon_add.returnPressed.connect(self.monitor_typed)
+        add_btn = QPushButton("Add")
+        add_btn.setObjectName("primary")
+        add_btn.clicked.connect(self.monitor_typed)
+        self.mon_interval = QComboBox()
+        for label, _secs in (("Every second", 1), ("Every 2 seconds", 2), ("Every 5 seconds", 5)):
+            self.mon_interval.addItem(label, _secs)
+        self.mon_interval.currentIndexChanged.connect(self.monitor_restart)
+        self.mon_span = QComboBox()
+        for label, mins in (("Last 5 minutes", 5), ("Last 15 minutes", 15)):
+            self.mon_span.addItem(label, mins)
+        self.mon_span.currentIndexChanged.connect(self.refresh_monitor)
+        self.mon_pause = QPushButton("Pause")
+        self.mon_pause.setCheckable(True)
+        self.mon_pause.toggled.connect(lambda on: (self.mon_pause.setText("Resume" if on else "Pause"),
+                                                   self.monitor_restart()))
+        controls, cl, _ = make_card("Monitor connection quality")
+        row = QHBoxLayout()
+        row.addWidget(self.mon_add, 1)
+        row.addWidget(add_btn)
+        row.addSpacing(12)
+        row.addWidget(self.mon_interval)
+        row.addWidget(self.mon_span)
+        row.addWidget(self.mon_pause)
+        cl.addLayout(row)
+        hint = QLabel("Pings each device and charts how long replies take. Spikes mean lag; × marks are "
+                      "pings that got no reply (dropped packets). Up to 8 devices.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        cl.addWidget(hint)
+
+        chart_card, chl, _ = make_card("Latency")
+        self.mon_chart = LatencyChart(self)
+        chl.addWidget(self.mon_chart, 1)
+
+        self.mon_table = QTableWidget(0, 8)
+        self.mon_table.setHorizontalHeaderLabels(["", "DEVICE", "LAST", "AVERAGE", "MIN", "MAX", "JITTER", "LOSS"])
+        self.mon_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.mon_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.mon_table.setShowGrid(False)
+        self.mon_table.verticalHeader().setVisible(False)
+        self.mon_table.verticalHeader().setDefaultSectionSize(30)
+        self.mon_table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.mon_table.horizontalHeader().setHighlightSections(False)
+        self.mon_table.horizontalHeader().setStretchLastSection(True)
+        self.mon_table.setMaximumHeight(34 + 30 * 4)
+        self.mon_table.itemSelectionChanged.connect(self.monitor_buttons)
+        self.mon_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.mon_table.customContextMenuRequested.connect(self.monitor_menu)
+        delete = QAction("Remove", self.mon_table)
+        delete.setShortcut(QKeySequence.Delete)
+        delete.setShortcutContext(Qt.WidgetShortcut)
+        delete.triggered.connect(self.monitor_remove_selected)
+        self.mon_table.addAction(delete)
+        self.mon_remove_btn = remove_btn = QPushButton("Remove")
+        remove_btn.setToolTip("Remove the selected device(s) from the monitor (or press Delete)")
+        remove_btn.clicked.connect(self.monitor_remove_selected)
+        clear_btn = QPushButton("Clear all")
+        clear_btn.clicked.connect(lambda: self.monitor_remove(list(self.monitored)))
+        table_card, tl, th = make_card("Devices")
+        th.addStretch(1)
+        th.addWidget(remove_btn)
+        th.addWidget(clear_btn)
+        tl.addWidget(self.mon_table)
+
+        page = QWidget()
+        pl = QVBoxLayout(page)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(12)
+        pl.addWidget(controls)
+        pl.addWidget(chart_card, 1)
+        pl.addWidget(table_card)
+        return page
+
+    def monitor_interval(self):
+        return self.mon_interval.currentData() or 1
+
+    def monitor_span(self):
+        return (self.mon_span.currentData() or 5) * 60
+
+    def monitor_label(self, ip):
+        h = self.hosts.get(ip)
+        if not h:
+            return ip
+        return self.devices.nickname(h) or h.get("hostname") or h.get("friendly") or ip
+
+    def monitor_hosts(self, ips):
+        added = [ip for ip in ips if self.monitor_add(ip, self.monitor_label(ip))]
+        if added:
+            self.tabbar.setCurrentIndex(2)
+
+    def monitor_typed(self):
+        target = self.mon_add.text().strip()
+        if not re.fullmatch(r"[0-9A-Za-z.:-]{1,253}", target) or target.startswith("-"):
+            self.status.setText("Enter an IP address or hostname to monitor.")
+            return
+        if self.monitor_add(target, self.monitor_label(target)):
+            self.mon_add.clear()
+
+    def monitor_add(self, ip, label):
+        if ip in self.monitored:
+            return True
+        if len(self.monitored) >= MONITOR_MAX:
+            self.status.setText(f"The monitor shows up to {MONITOR_MAX} devices (one colour each). "
+                                "Remove one to add another.")
+            return False
+        used = {m["slot"] for m in self.monitored.values()}
+        slot = next(i for i in range(MONITOR_MAX) if i not in used)  # a colour stays with its device
+        self.monitored[ip] = {"slot": slot, "label": label, "samples": deque(maxlen=3600)}
+        self.monitor_restart()
+        self.refresh_monitor()
+        return True
+
+    def monitor_selected(self):
+        t = self.mon_table
+        return [t.item(r, 1).data(Qt.UserRole) for r in sorted({i.row() for i in t.selectedIndexes()})
+                if t.item(r, 1)]
+
+    def monitor_buttons(self):
+        # With a single device there's nothing to choose, so Remove works without selecting it.
+        self.mon_remove_btn.setEnabled(bool(self.monitor_selected()) or len(self.monitored) == 1)
+
+    def monitor_menu(self, pos):
+        ips = self.monitor_selected()
+        if not ips:
+            return
+        menu = QMenu(self)
+        menu.addAction("Remove" + (f" {len(ips)} devices" if len(ips) > 1 else ""), self.monitor_remove_selected)
+        menu.exec(self.mon_table.viewport().mapToGlobal(pos))
+
+    def monitor_remove_selected(self):
+        ips = self.monitor_selected() or (list(self.monitored) if len(self.monitored) == 1 else [])
+        self.monitor_remove(ips)
+
+    def monitor_remove(self, ips):
+        for ip in ips:
+            self.monitored.pop(ip, None)
+        self.monitor_restart()
+        self.refresh_monitor()
+
+    def monitor_restart(self):
+        if self.monitored and not self.mon_pause.isChecked():
+            self.mon_timer.start(self.monitor_interval() * 1000)
+            self.monitor_tick()
+        else:
+            self.mon_timer.stop()
+
+    def monitor_tick(self):
+        self.pinger.ping(list(self.monitored))
+
+    def monitor_result(self, ip, when, ms):
+        if ip in self.monitored and not self.mon_pause.isChecked():
+            self.monitored[ip]["samples"].append((when, ms))
+            if self.tabbar.currentIndex() == 2:
+                self.refresh_monitor()
+
+    def visible_series(self, t0):
+        colors = SERIES_COLORS[THEME]
+        return [(ip, colors[m["slot"]], m["label"], [s for s in m["samples"] if s[0] >= t0])
+                for ip, m in sorted(self.monitored.items(), key=lambda kv: kv[1]["slot"])]
+
+    def refresh_monitor(self):
+        self.mon_chart.update()
+        t = self.mon_table
+        t0 = time.time() - self.monitor_span()
+        series = self.visible_series(t0)
+        rows_now = [t.item(r, 1).data(Qt.UserRole) if t.item(r, 1) else None for r in range(t.rowCount())]
+        if rows_now != [ip for ip, *_ in series]:
+            # The device list changed: rebuild the rows, keeping the selection by IP.
+            keep = set(self.monitor_selected())
+            t.blockSignals(True)
+            t.clearSelection()
+            t.setRowCount(0)
+            t.setRowCount(len(series))
+            for row, (ip, _color, _label, _samples) in enumerate(series):
+                for col in range(t.columnCount()):
+                    t.setItem(row, col, QTableWidgetItem(""))
+                t.item(row, 1).setData(Qt.UserRole, ip)
+                t.item(row, 0).setTextAlignment(Qt.AlignCenter)
+                if ip in keep:
+                    t.selectionModel().select(t.model().index(row, 0),
+                                              QItemSelectionModel.Select | QItemSelectionModel.Rows)
+            t.blockSignals(False)
+        fmt = lambda v: "—" if v is None else f"{v:.1f} ms"
+        for row, (ip, color, label, samples) in enumerate(series):
+            # Update the existing items' text in place, so selection and clicks are never disturbed.
+            st = latency_stats(samples)
+            last = "no reply" if samples and st["last"] is None else fmt(st["last"])
+            loss = "—" if st["loss"] is None else f"{st['loss']:.0f}%  ({sum(1 for s in samples if s[1] is None)}/{st['count']})"
+            texts = ["●", label if label == ip else f"{label}  ({ip})", last, fmt(st["avg"]), fmt(st["min"]),
+                     fmt(st["max"]), fmt(st["jitter"]), loss]
+            for col, text in enumerate(texts):
+                if t.item(row, col).text() != text:
+                    t.item(row, col).setText(text)
+            t.item(row, 0).setForeground(QColor(color))
+            t.item(row, 7).setForeground(QColor(AMBER if st["loss"] else TEXT))
+        t.resizeColumnsToContents()
+        t.setColumnWidth(0, 30)
+        self.monitor_buttons()
+
+    # ---- network map -------------------------------------------------------------
+
+    def map_tooltip(self, ip):
+        h = self.hosts.get(ip, {})
+        kind, _ = self.devices.device_type(h, self.ports.get(ip), self.gateway()) if h else ("unknown", True)
+        ident = self.identified(h, self.ports.get(ip))[0] if h else ""
+        ports = self.network_ports(ip)
+        lines = [f"<b>{html.escape(self.monitor_label(ip))}</b>", f"{ip} · {DEVICE_TYPES[kind]}"]
+        lines += [html.escape(x) for x in (h.get("vendor", ""), ident) if x]
+        if ports:
+            lines.append("Open: " + html.escape(summarize_ports(ports)))
+        for pt in risky(ports):
+            lines.append(f'<span style="color:{AMBER}">⚠ {html.escape(port_label(pt))}: {html.escape(port_risk(pt))}</span>')
+        for mp in h.get("upnp") or []:
+            lines.append(f'<span style="color:{AMBER}">⚠ opened internet port {mp["external_port"]}/{mp["protocol"]}</span>')
+        if h.get("mac") in self.new_devices:
+            lines.append("New: first time seen")
+        lines.append('<span style="color:gray">Click to show it on the Scan tab</span>')
+        return "<br>".join(lines)
+
+    def show_host(self, ip):
+        """Jump to a device's row on the Scan tab."""
+        row = self.row_for_ip(ip)
+        if row is None:
+            return
+        self.tabbar.setCurrentIndex(0)
+        self.filter_edit.clear()
+        self.table.selectRow(row)
+        self.table.scrollToItem(self.table.item(row, COL_IP))
+
+    # ---- internet tab ----------------------------------------------------------
+
+    @staticmethod
+    def make_tile(label):
+        """A stat tile: small caps label, big value, muted detail line. Returns (frame, value, detail)."""
+        frame = QFrame()
+        frame.setObjectName("tile")
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(14, 10, 14, 12)
+        lay.setSpacing(2)
+        name = QLabel(label.upper())
+        name.setObjectName("tileLabel")
+        value = QLabel("—")
+        value.setObjectName("tileValue")
+        value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        detail = QLabel("")
+        detail.setObjectName("muted")
+        detail.setWordWrap(True)
+        for w in (name, value, detail):
+            lay.addWidget(w)
+        lay.addStretch(1)
+        return frame, value, detail
+
+    def build_internet_page(self):
+        self.worker = Worker()
+        self.worker.done.connect(self.worker_done)
+        self.net_check_btn = QPushButton("Check now")
+        self.net_check_btn.setObjectName("primary")
+        self.net_check_btn.clicked.connect(self.run_internet_check)
+        trace_btn = QPushButton("Trace route to the internet")
+        trace_btn.clicked.connect(lambda: self.trace_route("1.1.1.1", "the internet (1.1.1.1)"))
+        self.net_when = QLabel("Not checked yet. Contacts Cloudflare (1.1.1.1) only when you press Check now.")
+        self.net_when.setObjectName("muted")
+        card, cl, head = make_card("Internet connection")
+        head.addWidget(self.net_when, 1)
+        head.addWidget(trace_btn)
+        head.addWidget(self.net_check_btn)
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        self.net_tiles = {}
+        for i, (key, label) in enumerate((("ip", "Public IP"), ("route", "Route to the internet"),
+                                          ("router", "Router latency"), ("cf", "Internet latency"),
+                                          ("dns", "DNS server"), ("dns_ms", "DNS lookup"),
+                                          ("google", "Google DNS latency"), ("loss", "Packet loss"))):
+            frame, value, detail = self.make_tile(label)
+            grid.addWidget(frame, i // 4, i % 4)
+            self.net_tiles[key] = (value, detail)
+        cl.addLayout(grid)
+
+        self.speed_btn = QPushButton("Run speed test")
+        self.speed_btn.setObjectName("primary")
+        self.speed_btn.clicked.connect(self.run_speed_test)
+        self.speed_note = QLabel(f"About 12 seconds through Cloudflare's speed test, using up to "
+                                 f"{SPEED_DOWN_BYTES // 1_000_000} MB down and {SPEED_UP_BYTES // 1_000_000} MB up. "
+                                 "Through a VPN it measures the VPN's speed.")
+        self.speed_note.setObjectName("muted")
+        self.speed_note.setWordWrap(True)
+        speed, sl, sh = make_card("Speed test")
+        sh.addWidget(self.speed_note, 1)
+        sh.addWidget(self.speed_btn)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.speed_tiles = {}
+        for key, label in (("down", "Download"), ("up", "Upload")):
+            frame, value, detail = self.make_tile(label)
+            row.addWidget(frame)
+            self.speed_tiles[key] = (value, detail)
+        sl.addLayout(row)
+
+        page = QWidget()
+        pl = QVBoxLayout(page)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(12)
+        pl.addWidget(card)
+        pl.addWidget(speed)
+        pl.addStretch(1)
+        return page
+
+    def run_internet_check(self):
+        self.net_check_btn.setEnabled(False)
+        self.net_when.setText("Checking…")
+        self.worker.run("internet", internet_check, self.watch_target()["gateway"] if self.watch_target() else None)
+
+    def run_speed_test(self):
+        self.speed_btn.setEnabled(False)
+        for value, detail in self.speed_tiles.values():
+            value.setText("…")
+            detail.setText("testing")
+        self.worker.run("speed", speed_test)
+
+    def device_name_for(self, ip):
+        """'Trading Pi' for an address NetScan knows, else ''."""
+        h = self.hosts.get(ip)
+        rec = self.devices.get(h) if h else next((d for d in self.devices.devices.values() if d.get("ip") == ip), {})
+        return rec.get("nickname") or (h or {}).get("hostname") or rec.get("hostname", "")
+
+    def worker_done(self, tag, res):
+        if tag == "speed":
+            self.speed_btn.setEnabled(True)
+            if isinstance(res, Exception):
+                busy = isinstance(res, urllib.error.HTTPError) and res.code == 429
+                for value, detail in self.speed_tiles.values():
+                    value.setText("—")
+                    detail.setText("Cloudflare's speed test is rate-limiting this connection; try again in a few "
+                                   "minutes." if busy else f"failed: {res}")
+                return
+            for key in ("down", "up"):
+                value, detail = self.speed_tiles[key]
+                value.setText(f"{res[key]:.0f} Mbit/s")
+                detail.setText(f"at {res['when']} · ≈ {res[key] / 8:.1f} MB/s · {res['used_mb']:.0f} MB used in total")
+            return
+        if tag != "internet":
+            return
+        self.net_check_btn.setEnabled(True)
+        if isinstance(res, Exception):
+            self.net_when.setText(f"Check failed: {res}")
+            return
+        t = self.net_tiles
+        self.net_when.setText(f"Checked at {res['when']}." + (" Some checks failed: " + "; ".join(res["errors"])
+                                                              if res.get("errors") else ""))
+        trace = res.get("trace") or {}
+        t["ip"][0].setText(trace.get("ip", "—"))
+        t["ip"][1].setText(" · ".join(x for x in (trace.get("loc", ""), f"Cloudflare {trace['colo']}"
+                                                 if trace.get("colo") else "") if x) or "no answer from Cloudflare")
+        router_ip = (self.upnp or {}).get("public_ip")
+        if trace.get("ip") and router_ip:
+            via = router_ip != trace["ip"]
+            t["route"][0].setText("VPN / proxy" if via else "Direct")
+            t["route"][1].setText(f"your router's public IP is {router_ip}" if via else
+                                  "the internet sees your router's own IP")
+        else:
+            t["route"][0].setText("Unknown")
+            t["route"][1].setText("needs the router's UPnP (Scan tab) to compare public IPs")
+        for key, target in (("router", "your router"), ("cf", "Cloudflare 1.1.1.1"), ("google", "Google 8.8.8.8")):
+            ms, loss = res.get(key) or (None, None)
+            t[key][0].setText("—" if ms is None else f"{ms:.1f} ms")
+            t[key][1].setText(f"median of 5 pings to {target}" if ms is not None else "no reply")
+        servers = res.get("dns") or []
+        named = [f"{ip} ({self.device_name_for(ip)})" if self.device_name_for(ip) else ip for ip in servers]
+        t["dns"][0].setText(servers[0] if servers else "—")
+        t["dns"][1].setText(", ".join(named) if named else "couldn't read the DNS settings")
+        ms = res.get("dns_ms")
+        t["dns_ms"][0].setText("—" if ms is None else f"{ms:.0f} ms")
+        t["dns_ms"][1].setText("uncached lookup" + (": slow, sites may feel sluggish to start" if ms and ms > 150
+                                                    else ": fine" if ms else ""))
+        losses = [res[k][1] for k in ("router", "cf", "google") if res.get(k)]
+        worst = max(losses) if losses else None
+        t["loss"][0].setText("—" if worst is None else f"{worst:.0f}%")
+        t["loss"][1].setText("worst of the three" + (": check Wi-Fi or cables" if worst else ""))
+        t["loss"][0].setStyleSheet(f"color: {AMBER};" if worst else "")
 
     # ---- watch mode --------------------------------------------------------
 
@@ -3550,7 +5593,7 @@ class MainWindow(QMainWindow):
             "saved": datetime.datetime.now().isoformat(timespec="seconds"),
             "target": self.last_target,
             "hosts": [{**h, "ports": self.network_ports(ip) if ip in self.ports else None} for ip, h in
-                      sorted(self.hosts.items(), key=lambda kv: ipaddress.ip_address(kv[0]))],
+                      sorted(self.hosts.items(), key=lambda kv: ip_sort_key(kv[0]))],
         }
 
     def default_name(self, ext):
@@ -3624,6 +5667,38 @@ class MainWindow(QMainWindow):
             box.setDetailedText("\n".join(lines))
             box.exec()
 
+    def report_data(self):
+        """Everything the HTML report shows, as plain data."""
+        me, any_trusted = self.local_ip(), self.devices.any_trusted()
+        hosts = []
+        for ip, h in sorted(self.hosts.items(), key=lambda kv: ip_sort_key(kv[0])):
+            rec = self.devices.get(h)
+            ports = self.ports.get(ip)
+            shown = self.network_ports(ip) if ip in self.ports else None
+            kind = self.devices.device_type(h, ports, self.gateway())[0]
+            hosts.append({
+                "ip": ip, "nickname": rec.get("nickname", ""), "hostname": h["hostname"], "mac": h["mac"],
+                "vendor": h["vendor"], "os": h.get("os", ""), "type": DEVICE_TYPES[kind],
+                "identified": self.identified(h, ports)[0], "ports": shown, "all_ports": ports or [],
+                "risky": risky(shown), "upnp": h.get("upnp") or [], "this": ip == me,
+                "new": h["mac"] in self.new_devices, "notes": rec.get("notes", ""),
+                "untrusted": any_trusted and bool(h["mac"]) and ip != me and not rec.get("trusted"),
+                "label": rec.get("nickname") or h["hostname"] or ip,
+            })
+        return {"network": self.last_target, "when": datetime.datetime.now().strftime("%d %b %Y, %H:%M"),
+                "scanner": f"{socket.gethostname()} ({me})" if me else socket.gethostname(),
+                "upnp": self.upnp, "hosts": hosts}
+
+    def export_report(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save network report", self.default_name("html"),
+                                              "Web page (*.html)")
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(build_report(self.report_data()))
+        self.status.setText(f"Saved the network report to {path}")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
     def export_csv(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export CSV", self.default_name("csv"), "CSV (*.csv)")
         if not path:
@@ -3656,6 +5731,7 @@ class MainWindow(QMainWindow):
         QGuiApplication.clipboard().setText("\n".join(lines))
 
     def closeEvent(self, event):
+        self.mon_timer.stop()
         self.save_notes()
         self.save_settings()
         if self.watch_proc is not None and self.watch_proc.state() != QProcess.NotRunning:
