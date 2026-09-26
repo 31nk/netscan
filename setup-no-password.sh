@@ -10,8 +10,8 @@
 # Trade-off: any program running as any user on this machine can then use nmap
 # to send raw packets. Fine for a personal desktop; think twice on a shared box.
 #
-# Run once:   pkexec /home/d/Projects/netscan/setup-no-password.sh
-# Undo:       pkexec /home/d/Projects/netscan/setup-no-password.sh --undo
+# Run once:   pkexec ~/Projects/netscan/setup-no-password.sh
+# Undo:       pkexec ~/Projects/netscan/setup-no-password.sh --undo
 set -e
 
 NMAP=/usr/bin/nmap
