@@ -3,7 +3,7 @@
 import html
 
 from . import theme as T
-from .columns import COL_IP
+from .columns import COL_IP, TAB_SCAN
 from .devices import DEVICE_TYPES, port_risk, risky
 from .scanning import port_label, summarize_ports
 
@@ -36,7 +36,7 @@ class MapMixin:
         row = self.row_for_ip(ip)
         if row is None:
             return
-        self.tabbar.setCurrentIndex(0)
+        self.tabbar.setCurrentIndex(TAB_SCAN)
         self.filter_edit.clear()
         self.table.selectRow(row)
         self.table.scrollToItem(self.table.item(row, COL_IP))

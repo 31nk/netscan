@@ -53,6 +53,9 @@ def icon_svgs():
                              'stroke-linecap="round" stroke-linejoin="round"/>'),
         "chevron": _SVG.format(f'<path d="M4 6l4 4 4-4" {_LINE.format(c=MUTED).replace("1.4", "1.8")}/>'),
         "search": _SVG.format(f'<circle cx="7" cy="7" r="4.5" {line}/><path d="M10.5 10.5L14 14" {line}/>'),
+        # theme switcher: a circle, half filled
+        "theme": _SVG.format(f'<circle cx="8" cy="8" r="6" fill="none" stroke="{TEXT}" stroke-width="1.5"/>'
+                             f'<path d="M8 2a6 6 0 0 1 0 12z" fill="{TEXT}"/>'),
         # device types
         "type-router": _SVG.format(f'<rect x="1.5" y="8.5" width="13" height="5" rx="1.5" {line}/>'
                                    f'<path d="M4.5 8.5L3.5 3M11.5 8.5l1-5.5" {line}/>'
@@ -112,6 +115,8 @@ QPushButton::menu-indicator {{ image: url("{chevron}"); width: 12px; height: 12p
                                subcontrol-origin: padding; subcontrol-position: right center;
                                right: 8px; }}
 QPushButton#menuButton {{ padding-right: 28px; }}
+QPushButton#iconMenu {{ padding-left: 0; padding-right: 0; min-width: 36px; }}
+QPushButton#iconMenu::menu-indicator {{ image: none; width: 0px; }}
 QPushButton#helpButton {{ padding-left: 0; padding-right: 0; min-width: 36px; font-weight: 600; }}
 
 QTextBrowser {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px; padding: 8px; color: {TEXT}; }}
@@ -171,7 +176,7 @@ QSplitter::handle {{ background: transparent; }}
 QFrame#segment {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 11px; }}
 QTabBar#pages {{ background: transparent; }}
 QTabBar#pages::tab {{ background: transparent; color: {MUTED}; border: none; border-radius: 8px;
-                      padding: 7px 14px; margin: 3px; font-weight: 600; }}
+                      padding: 7px 11px; margin: 2px; font-weight: 600; }}
 QTabBar#pages::tab:hover:!selected {{ color: {TEXT}; background: {HOVER}; }}
 QTabBar#pages::tab:selected {{ background: {ACCENT}; color: #ffffff; }}
 

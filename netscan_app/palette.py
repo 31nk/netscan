@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout
 
 from . import theme as T
-from .columns import DEV_MAC
+from .columns import DEV_MAC, TAB_DEVICES, TAB_INTERNET, TAB_SCAN, TAB_TOOLS, TAB_TRAFFIC
 from .scanning import ip_sort_key
 from .tools_tab import TOOL_GROUPS
 
@@ -118,22 +118,28 @@ class PaletteMixin:
 
     def palette_entries(self):
         tab = lambda i: (lambda: self.tabbar.setCurrentIndex(i))
-        entries = [("Tab", self.tabbar.tabText(i), tab(i)) for i in range(self.tabbar.count())]
+        tab_words = {"Traffic": "packets capture sniff wireshark lldp cdp switch port vlan dhcp",
+                     "Dashboard": "overview home summary status glance"}
+        entries = [("Tab", self.tabbar.tabText(i), tab(i), tab_words.get(self.tabbar.tabText(i), ""))
+                   for i in range(self.tabbar.count())]
         group_of = {name: group for group, names in TOOL_GROUPS for name in names}
         for row, name in self.tool_rows():
-            entries.append(("Tool", name, (lambda r=row: (self.tabbar.setCurrentIndex(5), self.tool_nav.setCurrentRow(r))),
+            entries.append(("Tool", name, (lambda r=row: (self.tabbar.setCurrentIndex(TAB_TOOLS), self.tool_nav.setCurrentRow(r))),
                             TOOL_KEYWORDS.get(name, "") + " " + group_of.get(name, "")))
         entries += [
-            ("Action", "Find hosts", lambda: (self.tabbar.setCurrentIndex(0), self.scan_btn.isEnabled() and self.start_scan())),
-            ("Action", "Scan ports", lambda: (self.tabbar.setCurrentIndex(0), self.ports_btn.isEnabled() and self.start_port_scan())),
-            ("Action", "Internet check", lambda: (self.tabbar.setCurrentIndex(3), self.run_internet_check())),
-            ("Action", "Speed test", lambda: (self.tabbar.setCurrentIndex(3), self.speed_btn.isEnabled() and self.run_speed_test()),
+            ("Action", "Find hosts", lambda: (self.tabbar.setCurrentIndex(TAB_SCAN), self.scan_btn.isEnabled() and self.start_scan())),
+            ("Action", "Scan ports", lambda: (self.tabbar.setCurrentIndex(TAB_SCAN), self.ports_btn.isEnabled() and self.start_port_scan())),
+            ("Action", "Internet check", lambda: (self.tabbar.setCurrentIndex(TAB_INTERNET), self.run_internet_check())),
+            ("Action", "Speed test", lambda: (self.tabbar.setCurrentIndex(TAB_INTERNET), self.speed_btn.isEnabled() and self.run_speed_test()),
              "bandwidth internet bufferbloat librespeed"),
             ("Action", "Network report (HTML)", self.export_report),
             ("Action", "Save scan", self.save_json),
             ("Action", "Trace route to the internet", lambda: self.trace_route("1.1.1.1", "the internet (1.1.1.1)")),
-            ("Action", "Wake-on-LAN by MAC", lambda: (self.tabbar.setCurrentIndex(1), self.mac_edit.setFocus())),
+            ("Action", "Wake-on-LAN by MAC", lambda: (self.tabbar.setCurrentIndex(TAB_DEVICES), self.mac_edit.setFocus())),
             ("Action", "Help", self.show_help),
+            ("Action", "Which switch port am I on?", lambda: (self.tabbar.setCurrentIndex(TAB_TRAFFIC), self.capture and
+                                                              self.capture.running or self.toggle_capture()),
+             "lldp cdp switch port vlan"),
             ("Action", "Copy for ticket", self.copy_for_ticket, "clipboard ticket psa summary text"),
             ("Action", "Portable mode (USB stick)", self.show_portable, "portable usb carry sync data folder"),
             ("Action", "Theme: light", lambda: self.retheme("light")),
@@ -153,7 +159,7 @@ class PaletteMixin:
         return entries
 
     def show_known_device(self, mac):
-        self.tabbar.setCurrentIndex(1)
+        self.tabbar.setCurrentIndex(TAB_DEVICES)
         self.dev_filter.clear()
         self.dev_show.setCurrentIndex(0)
         for r in range(self.dev_table.rowCount()):

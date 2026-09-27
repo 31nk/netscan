@@ -179,6 +179,9 @@ class ExportMixin:
         self.lan_server.stop()
         self.history_avg.flush()
         self.net_watch_timer.stop()
+        self.dash_timer.stop()
+        if self.capture:
+            self.capture.stop()
         self.watch_avg.flush()
         self.save_notes()
         self.save_settings()

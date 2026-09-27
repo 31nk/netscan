@@ -7,6 +7,7 @@ from PySide6.QtCore import (
 )
 
 from . import theme as T
+from .columns import TAB_DEVICES
 from .internet import ping_summary
 from .system import now_iso
 from .widgets import notify
@@ -79,7 +80,7 @@ class UptimeMixin:
                     notify(f"{name} went offline", f"{rec.get('ip', '')} stopped answering pings.")
                     self.set_dot(T.AMBER)
                     self.status.setText(f"⚠ {name} ({rec.get('ip', '')}) went offline.")
-        if self.tabbar.currentIndex() == 1:
+        if self.tabbar.currentIndex() == TAB_DEVICES:
             self.refresh_devices()
 
     def uptime_log(self, rec, state, downtime=None):

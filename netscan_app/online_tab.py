@@ -346,6 +346,7 @@ class OnlineMixin:
         self.net_watch_busy = False
         gw, router, internet = res
         now = time.time()
+        self.last_watch = {"ts": now, "router": router, "internet": internet}  # for the Dashboard
         if gw:
             self.watch_avg.add(ROUTER_KEY, router, now)
         self.watch_avg.add(LATENCY_KEY, internet, now)

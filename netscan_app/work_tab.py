@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme as T
+from .columns import TAB_SCAN, TAB_TOOLS
 from .audit import build_audit, logo_data_uri
 from .checks import find_services, security_checkup, security_measure
 from .devices import DEVICE_TYPES, DeviceStore, devices_file, set_site_dir
@@ -720,12 +721,12 @@ class WorkMixin:
     def copy_for_ticket(self):
         """Copy what's on screen (the current tool, or the current tab) as plain text for a ticket."""
         tab = self.tabbar.currentIndex()
-        if tab == 5 and self.tool_nav.currentItem():
+        if tab == TAB_TOOLS and self.tool_nav.currentItem():
             title, widget = self.tool_nav.currentItem().text(), self.tool_stack.currentWidget()
         else:
             title, widget = self.tabbar.tabText(tab), self.pages.currentWidget()
         body = widget_text(widget)
-        if tab == 0 and self.summary:
+        if tab == TAB_SCAN and self.summary:
             body = self.summary.strip() + "\n\n" + body
         head = (f"NetScan · {title} · site {self.sites.name()} · "
                 f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")

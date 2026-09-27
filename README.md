@@ -11,6 +11,14 @@ any network and on Linux, macOS and Windows. Nothing needs a login on other devi
 - **Internet**: public IP and VPN check, DNS, latency, and a speed test (Cloudflare or LibreSpeed) with a
   bufferbloat grade.
 - **Map**: every device around your router, grouped by type.
+- **Traffic**: a live look at the packets this computer's network card sees. Which switch and port you're
+  plugged into (LLDP and Cisco CDP: switch name, port, VLAN, voice VLAN, speed), spanning tree, DHCP servers
+  (a second one is flagged), DNS lookups, IP address conflicts, broadcast storms, protocols and top talkers.
+  It only listens. Save the capture to open it in Wireshark. It needs your password: on Linux a small helper
+  (`netscan_app/capture_helper.py`, nothing else) runs as root; macOS uses its built-in tcpdump; Windows uses
+  Npcap (installed with nmap).
+- **Dashboard**: internet, speed, security grade, devices and outages at a glance, everything that needs
+  attention, quick actions and two charts, built only from what NetScan already knows.
 - **Checkups**: *Slow internet?* finds whether a problem is your Wi-Fi, cable, router, internet provider,
   DNS or bufferbloat; *Security checkup* grades your network out of 100 with a fix for each problem;
   *Router check* spots double NAT, a shared provider address (CGNAT) and rogue DHCP servers; *Gaming & calls*

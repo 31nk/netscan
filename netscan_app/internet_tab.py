@@ -238,6 +238,8 @@ class InternetMixin:
 
     def internet_finished(self, res):
         self.net_check_btn.setEnabled(True)
+        if not isinstance(res, Exception):
+            self.last_internet = {**res, "ts": time.time()}  # for the Dashboard
         if isinstance(res, Exception):
             self.net_when.setText(f"Check failed: {res}")
             return

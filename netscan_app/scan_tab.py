@@ -138,6 +138,7 @@ class ScanMixin:
         for act in self.theme_group.actions():
             act.setChecked(act.data() == mode)
         self.search_act.setIcon(QIcon(icon_path("search")))
+        self.theme_btn.setIcon(QIcon(icon_path("theme")))
         self.dev_search_act.setIcon(QIcon(icon_path("search")))
         for i in range(1, self.detail_type.count()):
             self.detail_type.setItemIcon(i, QIcon(icon_path("type-" + self.detail_type.itemData(i))))

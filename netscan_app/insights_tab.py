@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme as T
+from .columns import TAB_TOOLS
 from .checks import (
     diagnosis, dhcp_args, dhcp_verdict, is_wireless, measure_connection, nat_measure, nat_verdict,
     parse_dhcp_discover, presence_rows, security_checkup, security_measure, survey_reading, survey_verdict,
@@ -54,7 +55,7 @@ class InsightsMixin:
     def open_tool(self, name):
         for row, tool in self.tool_rows():
             if tool == name:
-                self.tabbar.setCurrentIndex(5)
+                self.tabbar.setCurrentIndex(TAB_TOOLS)
                 self.tool_nav.setCurrentRow(row)
                 return
 
@@ -175,6 +176,7 @@ class InsightsMixin:
 
     def show_security(self, measured):
         res = security_checkup(self.security_context(measured))
+        self.last_security = {**res, "when": time.time()}  # for the Dashboard
         color = T.GREEN if res["score"] >= 75 else T.AMBER if res["score"] >= 50 else T.RED
         scanned = sum(1 for ip in self.hosts if ip in self.ports)
         if res["complete"]:

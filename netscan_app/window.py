@@ -10,7 +10,7 @@ from PySide6.QtGui import (
     QAction, QActionGroup, QGuiApplication, QIcon, QKeySequence,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFrame, QHBoxLayout, QHeaderView, QInputDialog,
+    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
     QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QSizePolicy, QSplitter,
     QStackedWidget, QTabBar, QTableWidget, QVBoxLayout, QWidget,
 )
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from . import history_db
 from . import theme as T
 from .columns import (
+    TAB_DASHBOARD, TAB_DEVICES, TAB_INTERNET, TAB_MAP, TAB_MONITOR, TAB_NAMES, TAB_SCAN, TAB_TOOLS, TAB_TRAFFIC,
     COLUMNS, COL_CHANGE, COL_HOST, COL_INFO, COL_IP, COL_OS, PORT_COLUMNS, WATCH_INTERVALS,
 )
 from .devices import DeviceStore, app_settings, devices_file, portable_dir, set_site_dir
@@ -28,6 +29,8 @@ from .insights_tab import InsightsMixin
 from .online_tab import OnlineMixin
 from .sites import Sites
 from .work_tab import WorkMixin
+from .traffic_tab import TrafficMixin
+from .dashboard_tab import DashboardMixin
 from .internet_tab import InternetMixin
 from .map_tab import MapMixin
 from .monitor_tab import MonitorMixin
@@ -47,7 +50,7 @@ from .widgets import Discovery, NetworkMap, Resolver, SsdpListener, StatusLabel
 
 
 class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin, ToolkitMixin, InsightsMixin, OnlineMixin,
-                 WorkMixin, MapMixin,
+                 WorkMixin, TrafficMixin, DashboardMixin, MapMixin,
                  InternetMixin, WatchMixin, PaletteMixin, ExportMixin, HelpMixin, QMainWindow):
     def __init__(self):
         super().__init__()
@@ -303,11 +306,15 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         bottom.addSpacing(6)
         bottom.addWidget(self.compare_btn)
         bottom.addWidget(self.export_btn)
+        bottom.addSpacing(6)
+        self.nmap_pill = QLabel()
+        self.nmap_pill.setObjectName("pill")
+        bottom.addWidget(self.nmap_pill)
 
         # Title row
         title = QLabel("NetScan")
         title.setObjectName("title")
-        subtitle = QLabel("Network discovery and port scanning with nmap")
+        subtitle = QLabel("Network toolkit")
         subtitle.setObjectName("subtitle")
         titles = QVBoxLayout()
         titles.setSpacing(0)
@@ -317,29 +324,27 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.tabbar.setObjectName("pages")
         self.tabbar.setDrawBase(False)
         self.tabbar.setExpanding(False)
-        self.tabbar.addTab("Scan")
-        self.tabbar.addTab("Devices")
-        self.tabbar.addTab("Monitor")
-        self.tabbar.setTabToolTip(2, "Ping devices over time: latency, jitter and packet loss (Ctrl+3)")
-        self.tabbar.addTab("Internet")
-        self.tabbar.setTabToolTip(3, "Public IP, VPN check, DNS, latency and a speed test (Ctrl+4)")
-        self.tabbar.addTab("Map")
-        self.tabbar.setTabToolTip(4, "Every device around your router, grouped by type (Ctrl+5)")
-        self.tabbar.addTab("Tools")
-        self.tabbar.setTabToolTip(5, "DNS lookup, port check, IP info, HTTP inspector, subnet, MAC, Wi-Fi (Ctrl+6)")
-        self.tabbar.setTabToolTip(0, "Find hosts and scan ports (Ctrl+1)")
-        self.tabbar.setTabToolTip(1, "Every device NetScan has seen: nicknames, Wake-on-LAN, watch, uptime alerts "
-                                     "(Ctrl+2)")
+        self.tabbar.setUsesScrollButtons(False)  # all tabs visible; the header makes room
+        tips = {TAB_DASHBOARD: "Everything at a glance: internet, speed, security, alerts",
+                TAB_SCAN: "Find hosts and scan ports",
+                TAB_DEVICES: "Every device NetScan has seen: nicknames, Wake-on-LAN, watch, uptime alerts",
+                TAB_MONITOR: "Ping devices over time: latency, jitter and packet loss",
+                TAB_INTERNET: "Public IP, VPN check, DNS, latency and a speed test",
+                TAB_MAP: "Every device around your router, grouped by type",
+                TAB_TOOLS: "Checkups, client work, DNS, websites, Wi-Fi, history and more",
+                TAB_TRAFFIC: "Live packets: which switch port you're on, DHCP, DNS, talkers"}
+        for i, name in enumerate(TAB_NAMES):
+            self.tabbar.addTab(name)
+            self.tabbar.setTabToolTip(i, f"{tips[i]} (Ctrl+{i + 1})")
         segment = QFrame()
         segment.setObjectName("segment")
         sl = QHBoxLayout(segment)
         sl.setContentsMargins(0, 0, 0, 0)
         sl.addWidget(self.tabbar)
-        self.nmap_pill = QLabel()
-        self.nmap_pill.setObjectName("pill")
-        self.theme_btn = QPushButton("Theme")
-        self.theme_btn.setObjectName("menuButton")
-        self.theme_btn.setToolTip("Light, dark, or follow your system setting")
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("iconMenu")
+        self.theme_btn.setIcon(QIcon(icon_path("theme")))
+        self.theme_btn.setToolTip("Theme: light, dark, or follow your system setting")
         theme_menu = QMenu(self.theme_btn)
         self.theme_group = QActionGroup(self)
         for mode in THEME_MODES:
@@ -349,22 +354,23 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
             self.theme_group.addAction(act)
         self.theme_group.triggered.connect(lambda act: self.retheme(act.data()))
         self.theme_btn.setMenu(theme_menu)
-        head = QHBoxLayout()
-        head.addLayout(titles)
-        head.addStretch(1)
-        head.addWidget(segment, 0, Qt.AlignVCenter)
-        head.addStretch(1)
         self.help_btn = QPushButton("?")
         self.help_btn.setObjectName("helpButton")
         self.help_btn.setToolTip("Help: tabs, tools, shortcuts and what goes online (F1)")
         self.help_btn.clicked.connect(self.show_help)
-        head.addWidget(self.help_btn, 0, Qt.AlignVCenter)
-        head.addSpacing(6)
-        head.addWidget(self.build_site_button(), 0, Qt.AlignVCenter)
-        head.addSpacing(6)
-        head.addWidget(self.theme_btn, 0, Qt.AlignVCenter)
-        head.addSpacing(6)
-        head.addWidget(self.nmap_pill, 0, Qt.AlignVCenter)
+        right = QHBoxLayout()
+        right.setSpacing(6)
+        right.addStretch(1)
+        for w in (self.build_site_button(), self.help_btn, self.theme_btn):
+            right.addWidget(w, 0, Qt.AlignVCenter)
+        # Three columns, the outer two stretching equally, so the tabs sit in the middle of the window.
+        head = QGridLayout()
+        head.setHorizontalSpacing(12)
+        head.addLayout(titles, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        head.addWidget(segment, 0, 1, Qt.AlignCenter)
+        head.addLayout(right, 0, 2)
+        head.setColumnStretch(0, 1)
+        head.setColumnStretch(2, 1)
 
         cards = QHBoxLayout()
         cards.setSpacing(12)
@@ -381,15 +387,14 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         sp.addLayout(cards)
         sp.addWidget(self.splitter, 1)
         self.pages = QStackedWidget()
-        self.pages.addWidget(scan_page)
-        self.pages.addWidget(self.build_devices_page())
-        self.pages.addWidget(self.build_monitor_page())
-        self.pages.addWidget(self.build_internet_page())
         map_card, ml, _ = make_card("Network map")
         self.net_map = NetworkMap(self)
         ml.addWidget(self.net_map, 1)
-        self.pages.addWidget(map_card)
-        self.pages.addWidget(self.build_tools_page())
+        pages = {TAB_SCAN: scan_page, TAB_DEVICES: self.build_devices_page(), TAB_MONITOR: self.build_monitor_page(),
+                 TAB_INTERNET: self.build_internet_page(), TAB_MAP: map_card, TAB_TOOLS: self.build_tools_page(),
+                 TAB_TRAFFIC: self.build_traffic_page(), TAB_DASHBOARD: self.build_dashboard_page()}
+        for i in range(len(TAB_NAMES)):
+            self.pages.addWidget(pages[i])
         self.tabbar.currentChanged.connect(self.switch_page)
 
         body.addLayout(head)
@@ -415,12 +420,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.uptime_state = {}  # mac -> {"up", "misses", "down_since"}
 
         for keys, slot in (("F5", self.shortcut_scan), ("F1", self.show_help), (QKeySequence.Find, self.focus_filter),
-                           ("Ctrl+1", lambda: self.tabbar.setCurrentIndex(0)),
-                           ("Ctrl+2", lambda: self.tabbar.setCurrentIndex(1)),
-                           ("Ctrl+3", lambda: self.tabbar.setCurrentIndex(2)),
-                           ("Ctrl+4", lambda: self.tabbar.setCurrentIndex(3)),
-                           ("Ctrl+5", lambda: self.tabbar.setCurrentIndex(4)),
-                           ("Ctrl+6", lambda: self.tabbar.setCurrentIndex(5)),
+                           *((f"Ctrl+{i + 1}", lambda i=i: self.tabbar.setCurrentIndex(i)) for i in range(len(TAB_NAMES))),
                            ("Ctrl+K", self.open_palette), ("Ctrl+Shift+C", self.copy_for_ticket)):
             act = QAction(self)
             act.setShortcut(QKeySequence(keys))
@@ -453,6 +453,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.uptime_restart()
         QTimer.singleShot(3000, lambda: self.worker.run("tk:prune", history_db.prune))
         QTimer.singleShot(1500, self.detect_site)
+        self.switch_page(self.tabbar.currentIndex())  # the first tab (Dashboard) gets filled in, as on a click
 
     # ---- settings ----------------------------------------------------------
 
@@ -515,6 +516,8 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
             self.status.setText("No LAN subnet detected. Type a target, e.g. 192.168.1.0/24")
         elif hasattr(self, "sites_table"):  # Re-detect: maybe we moved to another client's network
             self.detect_site()
+        if hasattr(self, "cap_iface") and not (self.capture and self.capture.running):
+            self.fill_capture_ifaces()
 
     def selected_target(self):
         """Return (nmap target list, network dict or None)."""
@@ -537,7 +540,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
     # ---- nicknames / wake-on-lan -------------------------------------------
 
     def shortcut_scan(self):
-        if self.tabbar.currentIndex() == 0 and self.scan_btn.isEnabled():
+        if self.tabbar.currentIndex() == TAB_SCAN and self.scan_btn.isEnabled():
             self.start_scan()
 
     def rename_selected(self):
@@ -579,15 +582,18 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
     def switch_page(self, index):
         self.pages.setCurrentIndex(index)
         for w in (self.compare_btn, self.export_btn):
-            w.setVisible(index == 0)
-        if index == 1:
+            w.setVisible(index == TAB_SCAN)
+        if index == TAB_DEVICES:
             self.refresh_devices()
-        if index == 2:
+        if index == TAB_MONITOR:
             self.refresh_monitor()
-        if index == 4:
+        if index == TAB_MAP:
             self.net_map.update()
+        if index == TAB_TRAFFIC:
+            self.refresh_traffic()
+        self.dashboard_shown(index == TAB_DASHBOARD)
 
     def focus_filter(self):
-        edit = self.dev_filter if self.tabbar.currentIndex() == 1 else self.filter_edit
+        edit = self.dev_filter if self.tabbar.currentIndex() == TAB_DEVICES else self.filter_edit
         edit.setFocus()
         edit.selectAll()

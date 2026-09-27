@@ -10,16 +10,21 @@ from .devices import data_dir, make_portable, portable_dir
 from .tools_tab import TOOL_GROUPS
 
 TABS = [
-    ("Scan", "Ctrl+1", "Find hosts on your network (F5), then scan their ports. Right-click a host for Wake-on-LAN, "
+    ("Dashboard", "Ctrl+1", "Everything at a glance: internet, speed, security grade, devices, outages, what needs "
+     "attention, and quick actions. Uses only what NetScan already knows."),
+    ("Scan", "Ctrl+2", "Find hosts on your network (F5), then scan their ports. Right-click a host for Wake-on-LAN, "
      "a nickname, SSH/web links, a traceroute, or a known-vulnerability check. Compare shows what changed since "
      "a saved scan."),
-    ("Devices", "Ctrl+2", "Every device NetScan has ever seen: nicknames, trusted flag, Wake-on-LAN, first/last seen, "
+    ("Devices", "Ctrl+3", "Every device NetScan has ever seen: nicknames, trusted flag, Wake-on-LAN, first/last seen, "
      "port changes, background watch and uptime alerts."),
-    ("Monitor", "Ctrl+3", "Ping devices over time: latency, jitter and packet loss, with a live chart."),
-    ("Internet", "Ctrl+4", "Public IP and VPN check, DNS servers, latency to your router and the internet, and a "
+    ("Monitor", "Ctrl+4", "Ping devices over time: latency, jitter and packet loss, with a live chart."),
+    ("Internet", "Ctrl+5", "Public IP and VPN check, DNS servers, latency to your router and the internet, and a "
      "speed test with a bufferbloat grade."),
-    ("Map", "Ctrl+5", "Everything around your router, grouped by type."),
-    ("Tools", "Ctrl+6", "The toolbox below."),
+    ("Map", "Ctrl+6", "Everything around your router, grouped by type."),
+    ("Tools", "Ctrl+7", "The toolbox below."),
+    ("Traffic", "Ctrl+8", "A live look at the packets this computer's network card sees: which switch and port "
+     "you're plugged into (LLDP/CDP), VLANs, spanning tree, DHCP servers, DNS lookups, IP conflicts, broadcast storms, "
+     "protocols and top talkers. Needs your password; it only listens. Save the capture to open in Wireshark."),
 ]
 
 TOOLS = dict([
@@ -60,7 +65,7 @@ TOOLS = dict([
 
 SHORTCUTS = [("F1", "This help"), ("F5", "Find hosts"), ("Ctrl+K", "Jump to anything (tabs, tools, devices, actions)"),
              ("Ctrl+Shift+C", "Copy what's on screen for a ticket"),
-             ("Ctrl+F", "Filter the host list"), ("Ctrl+1 … Ctrl+6", "Switch tabs"),
+             ("Ctrl+F", "Filter the host list"), ("Ctrl+1 … Ctrl+8", "Switch tabs"),
              ("Delete", "Remove the selected Monitor target")]
 
 ONLINE = [

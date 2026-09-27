@@ -13,3 +13,6 @@ DEV_STATUS, DEV_NAME, DEV_TYPE, DEV_SEEN, DEV_TRUST, DEV_IP, DEV_HOST, DEV_MAC, 
 # Background watch: (label, minutes between checks; 0 = off).
 WATCH_INTERVALS = [("Off", 0), ("Every minute", 1), ("Every 5 minutes", 5),
                    ("Every 15 minutes", 15), ("Every 30 minutes", 30), ("Every hour", 60)]
+# The main tabs, in the order they appear.
+TAB_NAMES = ["Dashboard", "Scan", "Devices", "Monitor", "Internet", "Map", "Tools", "Traffic"]
+TAB_DASHBOARD, TAB_SCAN, TAB_DEVICES, TAB_MONITOR, TAB_INTERNET, TAB_MAP, TAB_TOOLS, TAB_TRAFFIC = range(len(TAB_NAMES))

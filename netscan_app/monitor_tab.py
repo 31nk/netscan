@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from . import history_db
 from . import theme as T
+from .columns import TAB_MONITOR
 from .internet import latency_stats
 from .theme import make_card
 from .widgets import LatencyChart, MONITOR_MAX, Pinger, SERIES_COLORS
@@ -126,7 +127,7 @@ class MonitorMixin:
     def monitor_hosts(self, ips):
         added = [ip for ip in ips if self.monitor_add(ip, self.monitor_label(ip))]
         if added:
-            self.tabbar.setCurrentIndex(2)
+            self.tabbar.setCurrentIndex(TAB_MONITOR)
 
     def monitor_typed(self):
         target = self.mon_add.text().strip()
@@ -191,7 +192,7 @@ class MonitorMixin:
         if ip in self.monitored and not self.mon_pause.isChecked():
             self.monitored[ip]["samples"].append((when, ms))
             self.history_avg.add(self.monitored[ip]["label"], ms, when)
-            if self.tabbar.currentIndex() == 2:
+            if self.tabbar.currentIndex() == TAB_MONITOR:
                 self.refresh_monitor()
 
     def visible_series(self, t0):

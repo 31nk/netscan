@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog
 
 from netscan_app import window
+from netscan_app.columns import TAB_DASHBOARD, TAB_SCAN, TAB_TOOLS, TAB_TRAFFIC
 from netscan_app.help import TOOLS as HELP_TOOLS
 from netscan_app.tools_tab import TOOL_GROUPS
 from netscan_app.report import build_report
@@ -50,7 +51,7 @@ class Window(unittest.TestCase):
             for tab in range(win.tabbar.count()):
                 win.tabbar.setCurrentIndex(tab)
                 QApplication.processEvents()
-            win.tabbar.setCurrentIndex(5)
+            win.tabbar.setCurrentIndex(TAB_TOOLS)
             for row, name in win.tool_rows():
                 win.tool_nav.setCurrentRow(row)
                 QApplication.processEvents()
@@ -278,10 +279,73 @@ class Window(unittest.TestCase):
         with open(csv_path, encoding="utf-8") as f:
             self.assertTrue(f.readline().startswith("Name,Type,IP address"))
 
+    def test_traffic_tab(self):
+        import test_traffic as tt
+        from netscan_app.traffic import Analyzer
+        win = self.win
+        analyzer = Analyzer(local_macs=["74:56:3C:B9:2E:89"], local_ips=["10.0.0.9"], gateway="10.0.0.1")
+        t = 1_000_000.0
+        for frame in (tt.lldp_frame(), tt.stp_frame(), tt.arp(tt.ROUTER, "10.0.0.1"), tt.arp(tt.OTHER, "10.0.0.1")):
+            t += 0.5
+            analyzer.add(t, frame, len(frame))
+
+        class FakeCapture:
+            running, error, kept = True, "", [(t, tt.lldp_frame(), 100)]
+
+            def __init__(self):
+                self.analyzer = analyzer
+
+            def stop(self):
+                self.running = False
+
+            def save(self, path):
+                return 1
+
+        win.capture = FakeCapture()
+        win.tabbar.setCurrentIndex(TAB_TRAFFIC)
+        win.refresh_traffic()
+        self.assertEqual(win.cap_tiles["switch"][0].text(), "core-sw1 · port Office desk 12")
+        self.assertIn("VLAN 20", win.cap_tiles["switch"][1].text())
+        self.assertIn("router's address", win.cap_events.toPlainText())
+        self.assertIn("Root switch", win.cap_events.toPlainText())
+        self.assertGreater(win.cap_proto.rowCount(), 2)
+        win.tabbar.setCurrentIndex(TAB_DASHBOARD)  # the Dashboard lists the capture's warnings too
+        self.assertIn("Traffic: Two devices claim the router's address", win.dash_attention.toPlainText())
+        win.capture.stop()
+        win.capture = None
+        win.refresh_traffic()
+        self.assertEqual(win.cap_tiles["switch"][0].text(), "—")
+
+    def test_dashboard(self):
+        win = self.win
+        win.last_security = {"score": 62, "grade": "C", "complete": True, "findings": [], "when": 0}
+        win.web_state = {"https://client.example": {"ok": False, "error": "timed out", "status": None,
+                                                    "cert_days": None}}
+        win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+        text = win.dash_attention.toPlainText()
+        self.assertIn("https://client.example is down", text)
+        self.assertIn("Security grade C (62/100)", text)
+        self.assertEqual(win.dash_tiles["security"][0].text(), "C  62")
+        self.assertTrue(win.dash_timer.isActive())
+        win.tabbar.setCurrentIndex(TAB_SCAN)
+        self.assertFalse(win.dash_timer.isActive())
+        win.web_state = {}
+
+    def test_tab_order(self):
+        win = self.win
+        self.assertEqual([win.tabbar.tabText(i) for i in range(win.tabbar.count())],
+                         ["Dashboard", "Scan", "Devices", "Monitor", "Internet", "Map", "Tools", "Traffic"])
+        self.assertEqual(win.pages.count(), win.tabbar.count())
+        for i in range(win.tabbar.count()):  # each tab shows its own page
+            win.tabbar.setCurrentIndex(i)
+            self.assertIs(win.pages.currentWidget(), win.pages.widget(i))
+        self.assertIs(win.pages.widget(TAB_DASHBOARD).findChild(type(win.dash_attention)), win.dash_attention)
+        self.assertIs(win.pages.widget(TAB_TRAFFIC).findChild(type(win.cap_iface)), win.cap_iface)
+
     def test_open_tool(self):
         self.win.open_tool("Security checkup")
         self.assertEqual(self.win.tool_nav.currentItem().text(), "Security checkup")
-        self.assertEqual(self.win.tabbar.currentIndex(), 5)
+        self.assertEqual(self.win.tabbar.currentIndex(), TAB_TOOLS)
 
 
 if __name__ == "__main__":
