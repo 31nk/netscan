@@ -4,7 +4,8 @@ new network traffic): internet, speed, security, devices, outages, what needs at
 import datetime
 import time
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QSize, QTimer
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPushButton, QTextBrowser, QVBoxLayout, QWidget
 
 from . import history_db
@@ -13,8 +14,28 @@ from .columns import TAB_INTERNET, TAB_SCAN, TAB_TRAFFIC
 from .devices import risky
 from .insights_tab import findings_html
 from .outages import LATENCY_KEY
-from .theme import make_card
-from .widgets import TimeSeriesChart
+from .theme import icon_path, make_card
+from .widgets import HealthRing, TimeSeriesChart
+
+
+def health_score(attention, outages_week, down, measured):
+    """Overall health 0-100 from the same things "Needs attention" lists, or None before anything's measured.
+    Each serious problem costs 10 (at most 40), each warning 3 (at most 15), each internet outage this week 5
+    (at most 20); while the internet or the home network is down it's 25 at most."""
+    if not measured:
+        return None
+    bad = sum(1 for lvl, _t, _d in attention if lvl == "bad")
+    warn = sum(1 for lvl, _t, _d in attention if lvl == "warn")
+    score = 100 - min(40, 10 * bad) - min(15, 3 * warn) - min(20, 5 * outages_week)
+    if down:
+        score = min(score, 25)
+    return max(0, score)
+
+
+def health_words(score):
+    if score is None:
+        return "Not enough data yet"
+    return "Healthy" if score >= 85 else "Needs a look" if score >= 60 else "Trouble"
 
 
 class DashboardMixin:
@@ -25,15 +46,42 @@ class DashboardMixin:
         pl = QVBoxLayout(page)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.setSpacing(12)
+        top = QHBoxLayout()
+        top.setSpacing(12)
+        hero, hl, _h = make_card()
+        inner = QHBoxLayout()
+        inner.setSpacing(18)
+        self.dash_ring = HealthRing()
+        self.dash_ring.setToolTip("Network health: 100 minus 10 for each serious problem, 3 for each warning and 5 "
+                                  "for each internet outage this week (25 at most while offline)")
+        words = QVBoxLayout()
+        words.setSpacing(4)
+        self.dash_headline = QLabel("")
+        self.dash_headline.setObjectName("heroTitle")
+        self.dash_sub = QLabel("")
+        self.dash_sub.setObjectName("muted")
+        self.dash_sub.setWordWrap(True)
+        self.dash_site = QLabel("")
+        self.dash_site.setObjectName("muted")
+        self.dash_site.setWordWrap(True)
+        words.addStretch(1)
+        for w in (self.dash_headline, self.dash_sub, self.dash_site):
+            words.addWidget(w)
+        words.addStretch(1)
+        inner.addWidget(self.dash_ring)
+        inner.addLayout(words, 1)
+        hl.addLayout(inner)
         grid = QGridLayout()
         grid.setSpacing(10)
         self.dash_tiles = {}
-        for i, (key, label) in enumerate((("site", "Site"), ("internet", "Internet"), ("speed", "Speed"),
-                                          ("security", "Security"), ("devices", "Devices"), ("outages", "Outages"))):
+        for i, (key, label) in enumerate((("internet", "Internet"), ("speed", "Speed"), ("security", "Security"),
+                                          ("devices", "Devices"), ("outages", "Outages"), ("switch", "Switch port"))):
             frame, value, detail = self.make_tile(label)
-            grid.addWidget(frame, 0, i)
+            grid.addWidget(frame, i // 3, i % 3)
             self.dash_tiles[key] = (value, detail)
-        pl.addLayout(grid)
+        top.addWidget(hero, 2)
+        top.addLayout(grid, 5)
+        pl.addLayout(top)
 
         row = QHBoxLayout()
         row.setSpacing(12)
@@ -48,18 +96,24 @@ class DashboardMixin:
         actions, acl, _h = make_card("Quick actions")
         buttons = QGridLayout()
         buttons.setSpacing(8)
-        for i, (label, slot) in enumerate((
-                ("Find hosts", lambda: (self.tabbar.setCurrentIndex(TAB_SCAN), self.scan_btn.isEnabled() and self.start_scan())),
-                ("Check internet", lambda: (self.tabbar.setCurrentIndex(TAB_INTERNET), self.run_internet_check())),
-                ("Speed test", lambda: (self.tabbar.setCurrentIndex(TAB_INTERNET), self.speed_btn.isEnabled() and self.run_speed_test())),
-                ("Slow internet?", lambda: (self.open_tool("Slow internet?"), self.run_diagnosis())),
-                ("Security checkup", lambda: (self.open_tool("Security checkup"), self.run_security())),
-                ("Site audit", lambda: self.open_tool("Site audit")),
-                ("Switch port (Traffic)", lambda: self.tabbar.setCurrentIndex(TAB_TRAFFIC)),
-                ("Copy for ticket", self.copy_for_ticket))):
+        self.dash_actions = []
+        for i, (icon, label, slot) in enumerate((
+                ("search", "Find hosts", lambda: (self.tabbar.setCurrentIndex(TAB_SCAN), self.scan_btn.isEnabled() and self.start_scan())),
+                ("globe", "Check internet", lambda: (self.tabbar.setCurrentIndex(TAB_INTERNET), self.run_internet_check())),
+                ("gauge", "Speed test", lambda: (self.tabbar.setCurrentIndex(TAB_INTERNET), self.speed_btn.isEnabled() and self.run_speed_test())),
+                ("pulse", "Slow internet?", lambda: (self.open_tool("Slow internet?"), self.run_diagnosis())),
+                ("shield", "Security checkup", lambda: (self.open_tool("Security checkup"), self.run_security())),
+                ("doc", "Site audit", lambda: self.open_tool("Site audit")),
+                ("port", "Switch port (Traffic)", lambda: self.tabbar.setCurrentIndex(TAB_TRAFFIC)),
+                ("copy", "Copy for ticket", self.copy_for_ticket))):
             b = QPushButton(label)
+            b.setObjectName("action")
+            b.setProperty("icon_name", icon)
+            b.setIcon(QIcon(icon_path(icon)))
+            b.setIconSize(QSize(16, 16))
             b.clicked.connect(slot)
             buttons.addWidget(b, i // 2, i % 2)
+            self.dash_actions.append(b)
         acl.addLayout(buttons)
         acl.addStretch(1)
         row.addWidget(attention, 3)
@@ -93,9 +147,9 @@ class DashboardMixin:
     def refresh_dashboard(self):
         now = time.time()
         t = self.dash_tiles
-        t["site"][0].setText(self.sites.name())
         net = self.current or self.watch_target()
-        t["site"][1].setText(f"{net['network']} via {net.get('gateway') or '?'}" if net else "no network detected")
+        for b in self.dash_actions:  # icons follow the theme
+            b.setIcon(QIcon(icon_path(b.property("icon_name"))))
 
         # Internet: the connection watch is freshest, then the last check.
         watch, check = getattr(self, "last_watch", None), getattr(self, "last_internet", None)
@@ -154,7 +208,29 @@ class DashboardMixin:
         t["outages"][0].setStyleSheet(f"color: {T.AMBER};" if internet else "")
         t["outages"][1].setText("last 7 days" + ("" if self.net_watch_box.isChecked() else " · watch is off"))
 
-        self.dash_attention.setHtml(findings_html(self.attention_items(now)))
+        value, detail = t["switch"]
+        sw = self.capture.analyzer.snapshot()["switch"] if self.capture else None
+        if sw:
+            value.setText(f"{sw.get('switch') or 'Switch'}")
+            detail.setText(f"port {sw.get('port_desc') or sw.get('port') or '?'}"
+                           + (f" · VLAN {sw['vlan']}" if sw.get("vlan") else ""))
+        else:
+            value.setText("—")
+            detail.setText("capturing…" if self.capture and self.capture.running else "start a capture on Traffic")
+
+        attention = self.attention_items(now)
+        measured = bool(self.hosts or self.devices.devices or watch or check or speed or sec)
+        down = bool(ongoing)
+        score = health_score(attention, len(internet), down, measured)
+        self.dash_ring.set_score(score, "health")
+        self.dash_headline.setText(health_words(score))
+        problems = [a for a in attention if a[0] in ("bad", "warn")]
+        self.dash_sub.setText("Nothing needs attention." if score is not None and not problems else
+                              f"{len(problems)} thing{'s' if len(problems) != 1 else ''} to look at below." if problems
+                              else "Find hosts, check the internet or run a speed test to get a score.")
+        self.dash_site.setText(f"{self.sites.name()} · " + (f"{net['network']} via {net.get('gateway') or '?'}"
+                                                           if net else "no network detected"))
+        self.dash_attention.setHtml(findings_html(attention))
         self.dash_when.setText(f"updated {time.strftime('%H:%M:%S')}")
         self.refresh_dashboard_charts(now)
 

@@ -14,7 +14,7 @@ from PySide6.QtCore import (
     QObject, QPointF, QProcess, QRectF, Qt, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QFontDatabase, QPainter, QPainterPath, QPen, QTextCursor,
+    QBrush, QColor, QFont, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPen, QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSystemTrayIcon,
@@ -137,6 +137,27 @@ def nice_ceiling(value):
     return next(m * exp for m in (1, 2, 5, 10) if m * exp >= value)
 
 
+def fill_under(p, segments, color, bottom):
+    """A soft fade under a line: each unbroken run of points, filled down to the baseline, from a tint of the
+    line's colour to nothing. Drawn before the line so the line stays crisp on top."""
+    for pts in segments:
+        if len(pts) < 2:
+            continue
+        top = min(pt.y() for pt in pts)
+        grad = QLinearGradient(0, top, 0, bottom)
+        tint = QColor(color)
+        tint.setAlpha(70 if T.THEME == "dark" else 55)
+        grad.setColorAt(0, tint)
+        tint.setAlpha(0)
+        grad.setColorAt(1, tint)
+        area = QPainterPath(QPointF(pts[0].x(), bottom))
+        for pt in pts:
+            area.lineTo(pt)
+        area.lineTo(QPointF(pts[-1].x(), bottom))
+        area.closeSubpath()
+        p.fillPath(area, QBrush(grad))
+
+
 class Pinger(QObject):
     """Pings each monitored address on a timer, in the background; one ping in flight per address."""
 
@@ -244,14 +265,19 @@ class LatencyChart(QWidget):
             pen = QPen(QColor(color), 2)
             pen.setCapStyle(Qt.RoundCap)
             pen.setJoinStyle(Qt.RoundJoin)
-            path, drawing = QPainterPath(), False
+            path, drawing, segments = QPainterPath(), False, []
             for t, ms in samples:
                 if ms is None:
                     drawing = False
                     continue
                 pt = QPointF(x_of(t), y_of(ms))
                 path.lineTo(pt) if drawing else path.moveTo(pt)
+                if not drawing:
+                    segments.append([])
+                segments[-1].append(pt)
                 drawing = True
+            if len(series) <= 3:  # more fills than that turn to mud
+                fill_under(p, segments, color, r.bottom())
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
@@ -783,11 +809,18 @@ class TimeSeriesChart(QWidget):
             pen.setJoinStyle(Qt.RoundJoin)
             path = QPainterPath()
             gap = span / 60  # don't join points across long silences (NetScan was closed)
-            prev = None
+            prev, segments = None, []
             for t, v in s:
                 pt = QPointF(x_of(t), y_of(v))
-                path.moveTo(pt) if prev is None or t - prev > gap else path.lineTo(pt)
+                if prev is None or t - prev > gap:
+                    path.moveTo(pt)
+                    segments.append([pt])
+                else:
+                    path.lineTo(pt)
+                    segments[-1].append(pt)
                 prev = t
+            if len(self.series) <= 3 and not self.dots:
+                fill_under(p, segments, color, r.bottom())
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
@@ -925,4 +958,45 @@ class PresenceChart(QWidget):
                 x = self.LEFT + c * cell
                 p.drawText(QRectF(x - 2, y, 80, self.BOTTOM - 4), Qt.AlignLeft | Qt.AlignVCenter,
                            start.strftime("%a") if daily else start.strftime("%H:00"))
+        p.end()
+
+
+class HealthRing(QWidget):
+    """The Dashboard's score: a 270° ring that fills with the score, coloured by how good it is."""
+
+    def __init__(self, size=132):
+        super().__init__()
+        self.score, self.caption = None, ""
+        self.setFixedSize(size, size)
+
+    def set_score(self, score, caption):
+        self.score, self.caption = score, caption
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        width = 11
+        box = QRectF(self.rect()).adjusted(width, width, -width, -width)
+        track = QPen(QColor(T.BORDER), width)
+        track.setCapStyle(Qt.RoundCap)
+        p.setPen(track)
+        p.drawArc(box, 225 * 16, -270 * 16)
+        if self.score is not None:
+            color = QColor(T.GREEN if self.score >= 85 else T.AMBER if self.score >= 60 else T.RED)
+            arc = QPen(color, width)
+            arc.setCapStyle(Qt.RoundCap)
+            p.setPen(arc)
+            p.drawArc(box, 225 * 16, int(-270 * 16 * max(0.02, self.score / 100)))
+        big = QFont(self.font())
+        big.setPointSizeF(big.pointSizeF() * 2.3)
+        big.setBold(True)
+        p.setFont(big)
+        p.setPen(QColor(T.TEXT))
+        p.drawText(self.rect().adjusted(0, -8, 0, -8), Qt.AlignCenter, "—" if self.score is None else str(self.score))
+        small = QFont(self.font())
+        small.setPointSizeF(small.pointSizeF() * 0.85)
+        p.setFont(small)
+        p.setPen(QColor(T.MUTED))
+        p.drawText(QRectF(0, self.height() * 0.62, self.width(), 20), Qt.AlignHCenter | Qt.AlignTop, self.caption)
         p.end()

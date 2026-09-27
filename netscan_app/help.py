@@ -10,7 +10,8 @@ from .devices import data_dir, make_portable, portable_dir
 from .tools_tab import TOOL_GROUPS
 
 TABS = [
-    ("Dashboard", "Ctrl+1", "Everything at a glance: internet, speed, security grade, devices, outages, what needs "
+    ("Dashboard", "Ctrl+1", "Everything at a glance: a health score (100 minus 10 per serious problem, 3 per "
+     "warning, 5 per outage this week), internet, speed, security grade, devices, outages, switch port, what needs "
      "attention, and quick actions. Uses only what NetScan already knows."),
     ("Scan", "Ctrl+2", "Find hosts on your network (F5), then scan their ports. Right-click a host for Wake-on-LAN, "
      "a nickname, SSH/web links, a traceroute, or a known-vulnerability check. Compare shows what changed since "

@@ -13,10 +13,18 @@ KEEP_DAYS = 30
 _LOCK = threading.Lock()
 
 
+_READY = set()  # database files already set up in this run
+
+
 def _connect():
-    db = sqlite3.connect(os.path.join(data_dir(), "history.db"), timeout=5)
-    db.execute("CREATE TABLE IF NOT EXISTS samples (ts REAL, kind TEXT, key TEXT, value REAL)")
-    db.execute("CREATE INDEX IF NOT EXISTS samples_kind_ts ON samples (kind, ts)")
+    path = os.path.join(data_dir(), "history.db")
+    fresh = path not in _READY or not os.path.exists(path)  # (the data folder may have been deleted meanwhile)
+    db = sqlite3.connect(path, timeout=5)
+    if fresh:
+        db.execute("PRAGMA journal_mode=WAL")  # the background checks can write while a chart reads
+        db.execute("CREATE TABLE IF NOT EXISTS samples (ts REAL, kind TEXT, key TEXT, value REAL)")
+        db.execute("CREATE INDEX IF NOT EXISTS samples_kind_ts ON samples (kind, ts)")
+        _READY.add(path)
     return db
 
 
@@ -46,28 +54,26 @@ def prune():
 
 
 def series(kind, since, max_points=400):
-    """{key: [(ts, value)]} for one kind since a time, averaged into at most max_points buckets per key."""
+    """{key: [(ts, value)]} for one kind since a time, averaged into at most max_points buckets per key.
+    The averaging happens in SQLite, so a month of per-minute samples stays quick."""
+    width = max(time.time() - since, 1) / max_points
     with _LOCK:
         try:
             with closing(_connect()) as db, db:
-                rows = db.execute("SELECT ts, key, value FROM samples WHERE kind = ? AND ts >= ? ORDER BY ts",
-                                  (kind, since)).fetchall()
+                most = db.execute("SELECT MAX(n) FROM (SELECT COUNT(*) AS n FROM samples WHERE kind = ? AND ts >= ? "
+                                  "GROUP BY key)", (kind, since)).fetchone()[0] or 0
+                if most <= max_points:  # few enough: every sample as it was recorded
+                    rows = db.execute("SELECT key, ts, value, 1 FROM samples WHERE kind = ? AND ts >= ? "
+                                      "ORDER BY key, ts", (kind, since)).fetchall()
+                else:
+                    rows = db.execute("SELECT key, AVG(ts), AVG(value), COUNT(*) FROM samples WHERE kind = ? AND "
+                                      "ts >= ? GROUP BY key, CAST((ts - ?) / ? AS INTEGER) ORDER BY key, MIN(ts)",
+                                      (kind, since, since, width)).fetchall()
         except sqlite3.Error:
             return {}
-    by_key = {}
-    for ts, key, value in rows:
-        by_key.setdefault(key, []).append((ts, value))
-    span = max(time.time() - since, 1)
-    width = span / max_points
     out = {}
-    for key, points in by_key.items():
-        if len(points) <= max_points:
-            out[key] = points
-            continue
-        buckets = {}
-        for ts, value in points:  # average within equal time buckets so long ranges stay light
-            buckets.setdefault(int((ts - since) // width), []).append((ts, value))
-        out[key] = [(sum(t for t, _v in b) / len(b), sum(v for _t, v in b) / len(b)) for _i, b in sorted(buckets.items())]
+    for key, ts, value, _n in rows:
+        out.setdefault(key, []).append((ts, value))
     return out
 
 

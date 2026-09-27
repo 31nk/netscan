@@ -171,6 +171,7 @@ class TrafficMixin:
             for key, text in (("switch", "Start a capture to see which switch port you're on"), ("rate", ""),
                               ("total", ""), ("bcast", "")):
                 self.cap_tiles[key][0].setText("—")
+                self.cap_tiles[key][0].setStyleSheet("")
                 self.cap_tiles[key][1].setText(text)
             self.cap_events.setHtml(f'<p style="color:{T.MUTED}">Switch announcements (LLDP from most brands, CDP '
                                     "from Cisco), spanning tree changes, DHCP servers, IP conflicts and broadcast "

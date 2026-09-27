@@ -331,6 +331,18 @@ class Window(unittest.TestCase):
         self.assertFalse(win.dash_timer.isActive())
         win.web_state = {}
 
+    def test_health_score(self):
+        from netscan_app.dashboard_tab import health_score, health_words
+        self.assertIsNone(health_score([], 0, False, measured=False))
+        self.assertEqual(health_score([("info", "", ""), ("good", "", "")], 0, False, True), 100)
+        items = [("bad", "", "")] * 5 + [("warn", "", "")] * 7
+        self.assertEqual(health_score(items, 9, False, True), 100 - 40 - 15 - 20)
+        self.assertEqual(health_score([], 0, True, True), 25)
+        self.assertEqual([health_words(s) for s in (None, 90, 70, 20)],
+                         ["Not enough data yet", "Healthy", "Needs a look", "Trouble"])
+        self.win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+        self.assertIn(self.win.dash_headline.text(), ("Healthy", "Needs a look", "Trouble", "Not enough data yet"))
+
     def test_tab_order(self):
         win = self.win
         self.assertEqual([win.tabbar.tabText(i) for i in range(win.tabbar.count())],

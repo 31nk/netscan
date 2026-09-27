@@ -53,6 +53,20 @@ def icon_svgs():
                              'stroke-linecap="round" stroke-linejoin="round"/>'),
         "chevron": _SVG.format(f'<path d="M4 6l4 4 4-4" {_LINE.format(c=MUTED).replace("1.4", "1.8")}/>'),
         "search": _SVG.format(f'<circle cx="7" cy="7" r="4.5" {line}/><path d="M10.5 10.5L14 14" {line}/>'),
+        # Dashboard quick actions
+        "globe": _SVG.format(f'<circle cx="8" cy="8" r="6.2" {line}/><path d="M1.8 8h12.4M8 1.8c2.2 2.4 2.2 9.9 0 '
+                             f'12.4M8 1.8c-2.2 2.4-2.2 9.9 0 12.4" {line}/>'),
+        "gauge": _SVG.format(f'<path d="M2.2 11.5a6.2 6.2 0 1 1 11.6 0" {line}/><path d="M8 10l3-4" {line}/>'
+                             f'<circle cx="8" cy="10" r="1" {dot}/>'),
+        "pulse": _SVG.format(f'<path d="M1.5 8.5h3l1.8-4.5 3 9 1.8-4.5h3.4" {line}/>'),
+        "shield": _SVG.format(f'<path d="M8 1.6l5.4 2v4.1c0 3.3-2.3 5.6-5.4 6.7-3.1-1.1-5.4-3.4-5.4-6.7V3.6z" {line}/>'
+                              f'<path d="M5.7 8l1.6 1.6 3-3.2" {line}/>'),
+        "doc": _SVG.format(f'<path d="M4 1.6h5.3L12.5 5v9.4H4z" {line}/><path d="M9.2 1.8V5h3.1M6 8.3h4.4M6 11h4.4" '
+                           f'{line}/>'),
+        "port": _SVG.format(f'<rect x="2" y="4" width="12" height="9" rx="1.4" {line}/>'
+                            f'<path d="M5 13V10.3h1.2V8.8h3.6v1.5H11V13" {line}/>'),
+        "copy": _SVG.format(f'<rect x="5" y="5" width="8.5" height="9.5" rx="1.4" {line}/>'
+                            f'<path d="M3 11V3a1.4 1.4 0 0 1 1.4-1.4H10" {line}/>'),
         # theme switcher: a circle, half filled
         "theme": _SVG.format(f'<circle cx="8" cy="8" r="6" fill="none" stroke="{TEXT}" stroke-width="1.5"/>'
                              f'<path d="M8 2a6 6 0 0 1 0 12z" fill="{TEXT}"/>'),
@@ -90,6 +104,7 @@ QLabel#title {{ font-size: 17pt; font-weight: 700; }}
 QLabel#subtitle, QLabel#muted {{ color: {MUTED}; }}
 QLabel#cardTitle, QLabel#fieldLabel {{ color: {MUTED}; font-size: 8pt; font-weight: 700; }}
 QLabel#bigName {{ font-size: 13pt; font-weight: 700; }}
+QLabel#heroTitle {{ font-size: 18pt; font-weight: 700; }}
 QLabel#pill {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 11px;
                padding: 3px 11px; color: {MUTED}; }}
 
@@ -105,9 +120,10 @@ QPushButton {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 
 QPushButton:hover {{ background: {HOVER}; border-color: {BORDER_HI}; }}
 QPushButton:pressed {{ background: {PRESSED}; }}
 QPushButton:disabled {{ color: {DIM}; background: {SURFACE}; border-color: {BORDER}; }}
-QPushButton#primary {{ background: {ACCENT}; border: 1px solid {ACCENT}; color: #ffffff;
-                       font-weight: 600; padding: 7px 20px; }}
+QPushButton#primary {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {accent_top}, stop:1 {ACCENT});
+                       border: 1px solid {ACCENT}; color: #ffffff; font-weight: 600; padding: 7px 20px; }}
 QPushButton#primary:hover {{ background: {ACCENT_HI}; border-color: {ACCENT_HI}; }}
+QPushButton#action {{ text-align: left; padding: 9px 12px; }}
 QPushButton#primary:pressed {{ background: {PRIMARY_PRESSED}; }}
 QPushButton#primary:disabled {{ background: {PRIMARY_OFF_BG}; border-color: {PRIMARY_OFF_BG};
                                 color: {PRIMARY_OFF_FG}; }}
@@ -178,7 +194,8 @@ QTabBar#pages {{ background: transparent; }}
 QTabBar#pages::tab {{ background: transparent; color: {MUTED}; border: none; border-radius: 8px;
                       padding: 7px 11px; margin: 2px; font-weight: 600; }}
 QTabBar#pages::tab:hover:!selected {{ color: {TEXT}; background: {HOVER}; }}
-QTabBar#pages::tab:selected {{ background: {ACCENT}; color: #ffffff; }}
+QTabBar#pages::tab:selected {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {accent_top},
+                                                           stop:1 {ACCENT}); color: #ffffff; }}
 
 QMenu {{ background: {RAISED}; border: 1px solid {BORDER}; padding: 6px; color: {TEXT}; }}
 QMenu::item {{ padding: 6px 22px 6px 14px; border-radius: 6px; }}
@@ -249,7 +266,8 @@ def apply_theme(app, mode="system"):
         pal.setColor(QPalette.Disabled, role, QColor(DIM))
     app.setPalette(pal)
     app.setStyleSheet(STYLESHEET.format(
-        **THEMES[THEME], check=icon_path("check"), chevron=icon_path("chevron")))
+        **THEMES[THEME], check=icon_path("check"), chevron=icon_path("chevron"),
+        accent_top=QColor(THEMES[THEME]["ACCENT"]).lighter(118).name()))
 
 
 def mono_font():

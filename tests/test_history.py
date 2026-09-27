@@ -15,8 +15,9 @@ from netscan_app.widgets import nice_ceiling
 class History(unittest.TestCase):
     def setUp(self):
         db = os.path.join(_support.TMP, "data", "history.db")
-        if os.path.exists(db):
-            os.remove(db)
+        for path in (db, db + "-wal", db + "-shm"):
+            if os.path.exists(path):
+                os.remove(path)
 
     def test_record_series_and_prune(self):
         now = time.time()

@@ -1,10 +1,11 @@
 """The main window: layout, settings, network detection, nicknames and Wake-on-LAN; the tabs come from the mixins."""
 
 import ipaddress
+import os
 import re
 
 from PySide6.QtCore import (
-    QTimer, Qt,
+    QSize, QTimer, Qt,
 )
 from PySide6.QtGui import (
     QAction, QActionGroup, QGuiApplication, QIcon, QKeySequence,
@@ -316,10 +317,17 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         title.setObjectName("title")
         subtitle = QLabel("Network toolkit")
         subtitle.setObjectName("subtitle")
-        titles = QVBoxLayout()
-        titles.setSpacing(0)
-        titles.addWidget(title)
-        titles.addWidget(subtitle)
+        names = QVBoxLayout()
+        names.setSpacing(0)
+        names.addWidget(title)
+        names.addWidget(subtitle)
+        logo = QLabel()
+        icon = QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons", "netscan.png"))
+        logo.setPixmap(icon.pixmap(QSize(38, 38), self.devicePixelRatioF()))
+        titles = QHBoxLayout()
+        titles.setSpacing(10)
+        titles.addWidget(logo)
+        titles.addLayout(names)
         self.tabbar = QTabBar()
         self.tabbar.setObjectName("pages")
         self.tabbar.setDrawBase(False)
