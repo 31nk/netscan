@@ -30,7 +30,8 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     exit 0
 fi
 
-[[ -f "$here/netscan.py" ]] || { echo "netscan.py not found next to this script."; exit 1; }
+[[ -f "$here/netscan.py" && -d "$here/netscan_app" ]] || {
+    echo "netscan.py and the netscan_app folder must be next to this script."; exit 1; }
 
 # The install command for a package on this distro: hint <pacman> <apt> <dnf/zypper>
 hint() {
@@ -106,4 +107,4 @@ if command -v pacman >/dev/null && [[ -f "$here/setup-no-password.sh" ]]; then
     echo "Optional: scan with full features without a password prompt each time:"
     echo "  pkexec \"$here/setup-no-password.sh\""
 fi
-echo "To update later: pull or copy the new netscan.py into $here (no reinstall needed)."
+echo "To update later: pull, or copy the new netscan.py and netscan_app folder into $here (no reinstall needed)."

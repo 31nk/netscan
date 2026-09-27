@@ -1,6 +1,6 @@
 # Install NetScan on Windows: nmap + Npcap, Python, PySide6, and Start menu/Desktop shortcuts.
 #
-# Run from the folder containing netscan.py, in PowerShell:
+# Run from the folder containing netscan.py and netscan_app\, in PowerShell:
 #   powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 # It asks for administrator rights (Chocolatey, nmap and Npcap need them).
 #
@@ -33,8 +33,8 @@ function Stop-Install($msg) {
     exit 1
 }
 
-if (-not (Test-Path (Join-Path $here 'netscan.py'))) {
-    Stop-Install "netscan.py not found next to this script ($here)."
+if (-not (Test-Path (Join-Path $here 'netscan.py')) -or -not (Test-Path (Join-Path $here 'netscan_app'))) {
+    Stop-Install "netscan.py and the netscan_app folder must be next to this script ($here)."
 }
 
 # ---- administrator rights ------------------------------------------------------
@@ -174,6 +174,10 @@ $venvPy = Join-Path $dest 'venv\Scripts\python.exe'
 Write-Step "Installing NetScan into $dest..."
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item (Join-Path $here 'netscan.py') $dest -Force
+$appDir = Join-Path $dest 'netscan_app'
+if (Test-Path $appDir) { Remove-Item $appDir -Recurse -Force }  # replace, so removed files don't linger
+Copy-Item (Join-Path $here 'netscan_app') $dest -Recurse -Force
+Remove-Item (Join-Path $appDir '__pycache__') -Recurse -Force -ErrorAction SilentlyContinue
 if (-not (Test-Path $venvPy)) {
     & $python -m venv (Join-Path $dest 'venv')
     if ($LASTEXITCODE -ne 0) { Stop-Install 'Could not create the Python environment.' }
@@ -204,5 +208,5 @@ if ($LASTEXITCODE -eq 0) {
 } else {
     Write-Host "`nNetScan is installed, but some checks failed (see above)." -ForegroundColor Yellow
 }
-Write-Host 'To update later: copy the new netscan.py next to this script and run it again.'
+Write-Host 'To update later: put the new netscan.py and netscan_app folder next to this script and run it again.'
 Read-Host 'Press Enter to close'

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Install NetScan on macOS: a Python venv with PySide6, plus ~/Applications/NetScan.app.
-# Run from the folder containing netscan.py:  bash install-mac.sh
+# Run from the folder containing netscan.py and netscan_app/:  bash install-mac.sh
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -8,7 +8,8 @@ support="$HOME/Library/Application Support/NetScan"
 app="$HOME/Applications/NetScan.app"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-[[ -f "$here/netscan.py" ]] || { echo "netscan.py not found next to this script."; exit 1; }
+[[ -f "$here/netscan.py" && -d "$here/netscan_app" ]] || {
+    echo "netscan.py and the netscan_app folder must be next to this script."; exit 1; }
 command -v nmap >/dev/null || { echo "nmap not found. Install it with: brew install nmap"; exit 1; }
 
 # Prefer Homebrew's Python; Apple's /usr/bin/python3 works too once the Xcode tools are installed.
@@ -18,6 +19,9 @@ echo "Using $python ($("$python" --version))"
 
 mkdir -p "$support"
 cp "$here/netscan.py" "$support/netscan.py"
+rm -rf "$support/netscan_app"  # replace, so files removed in an update don't linger
+cp -R "$here/netscan_app" "$support/netscan_app"
+rm -rf "$support/netscan_app/__pycache__"
 
 if [[ ! -x "$support/venv/bin/python" ]]; then
     echo "Creating Python environment..."
@@ -58,4 +62,4 @@ EOF
 echo
 echo "Done. Open NetScan from ~/Applications (or Spotlight: \"NetScan\")."
 echo "If macOS asks to let NetScan find devices on your local network, click Allow."
-echo "To update later: copy the new netscan.py here and run this script again."
+echo "To update later: get the new netscan.py and netscan_app folder here and run this script again."
