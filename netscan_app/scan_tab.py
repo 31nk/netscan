@@ -24,7 +24,7 @@ from .columns import (
     COL_VENDOR, DISCOVERY_FIELDS,
 )
 from .devices import DEVICE_TYPES, port_risk, risky, save_history, spoof_check
-from .discovery import cert_note, is_tls_port, is_web_port, ufw_active
+from .discovery import cert_note, is_tls_port, is_web_port, likely_app, ufw_active
 from .router import ROUTER_LEASE_CMD, askpass_helper, parse_dnsmasq_leases
 from .scanning import (
     CUSTOM_PROFILE, PORT_PROFILES, UDP_PORTS, WEB_PORTS, mac_vendor, merge_ports, parse_host,
@@ -421,7 +421,9 @@ class ScanMixin:
         ports.setForeground(QColor(T.AMBER if bad or exposed else T.GREEN if reachable else T.MUTED))
         ports.setToolTip("\n".join(
             [f"Internet port {m['external_port']}/{m['protocol']} → {ip}:{m['internal_port']}"
-             f"{' (' + m['description'] + ')' if m['description'] else ''}, opened via UPnP" for m in exposed]
+             f"{' (' + m['description'] + ')' if m['description'] else ''}, opened via UPnP"
+             + (f", likely {likely_app(m['protocol'], m['external_port'])}"
+                if likely_app(m["protocol"], m["external_port"]) else "") for m in exposed]
             + [f"{port_label(p)}: {port_risk(p)}" for p in bad]))
         self.apply_filter_row(row)
 
@@ -906,8 +908,9 @@ class ScanMixin:
         for m in h.get("upnp") or []:  # ports this device opened to the internet via UPnP
             row = self.details.rowCount()
             self.details.insertRow(row)
+            app = likely_app(m["protocol"], m["external_port"])
             cells = [str(m["internal_port"]), m["protocol"], m["description"] or "(no description)",
-                     f"internet port {m['external_port']}",
+                     f"internet port {m['external_port']}" + (f" · likely {app}" if app else ""),
                      "⚠ Opened to the internet by this device via UPnP"]
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)

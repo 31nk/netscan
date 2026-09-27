@@ -294,6 +294,21 @@ IGD_PATHS = ("/rootDesc.xml", "/igd.xml", "/gatedesc.xml", "/description.xml", "
 IGD_PORTS = (5000, 49152, 2048, 1780, 49000, 52869, 5431, 60000, 80)
 
 
+# Apps that commonly open router ports themselves, by (protocol, external port or range).
+KNOWN_FORWARDS = [
+    ("udp", (41641, 41641), "Tailscale (direct VPN connections)"), ("udp", (51820, 51820), "WireGuard VPN"),
+    ("udp", (1194, 1194), "OpenVPN"), ("tcp", (32400, 32400), "Plex media server"),
+    ("udp", (3074, 3074), "Xbox Live"), ("tcp", (3074, 3074), "Xbox Live"),
+    ("udp", (3478, 3480), "PlayStation / game voice (STUN)"), ("tcp", (27015, 27030), "Steam / game server"),
+    ("udp", (27015, 27030), "Steam / game server"), ("tcp", (25565, 25565), "Minecraft server"),
+    ("tcp", (6881, 6889), "BitTorrent"), ("udp", (6881, 6889), "BitTorrent"),
+]
+
+
+def likely_app(protocol, port):
+    return next((name for proto, (lo, hi), name in KNOWN_FORWARDS if proto == protocol and lo <= port <= hi), "")
+
+
 def find_router_upnp(gateway, candidates=(), ports=()):
     """The router's UPnP description, trying: remembered/SSDP URLs, then its open ports, then common ones."""
     urls = list(candidates)

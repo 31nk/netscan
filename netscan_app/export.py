@@ -174,6 +174,9 @@ class ExportMixin:
     def closeEvent(self, event):
         self.mon_timer.stop()
         self.uptime_timer.stop()
+        for timer in (self.traffic_timer, self.mtr_timer, self.web_timer):
+            timer.stop()
+        self.lan_server.stop()
         self.save_notes()
         self.save_settings()
         if self.watch_proc is not None and self.watch_proc.state() != QProcess.NotRunning:

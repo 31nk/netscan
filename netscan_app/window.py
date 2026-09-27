@@ -33,13 +33,15 @@ from .system import (
 )
 from .theme import THEME_MODES, icon_path, make_card, mono_font
 from .tools_tab import ToolsMixin
+from .toolkit_tab import ToolkitMixin
+from .palette import PaletteMixin
 from .uptime import UptimeMixin
 from .watch import WatchMixin
 from .widgets import Discovery, NetworkMap, Resolver, SsdpListener, StatusLabel
 
 
-class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin, MapMixin,
-                 InternetMixin, WatchMixin, ExportMixin, QMainWindow):
+class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin, ToolkitMixin, MapMixin,
+                 InternetMixin, WatchMixin, PaletteMixin, ExportMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("NetScan")
@@ -400,7 +402,8 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
                            ("Ctrl+3", lambda: self.tabbar.setCurrentIndex(2)),
                            ("Ctrl+4", lambda: self.tabbar.setCurrentIndex(3)),
                            ("Ctrl+5", lambda: self.tabbar.setCurrentIndex(4)),
-                           ("Ctrl+6", lambda: self.tabbar.setCurrentIndex(5))):
+                           ("Ctrl+6", lambda: self.tabbar.setCurrentIndex(5)),
+                           ("Ctrl+K", self.open_palette)):
             act = QAction(self)
             act.setShortcut(QKeySequence(keys))
             act.triggered.connect(slot)

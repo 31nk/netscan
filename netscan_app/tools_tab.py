@@ -92,7 +92,13 @@ class ToolsMixin:
             lay.addWidget(out, 1)
             self.tool_widgets[key] = {"edit": edit, "extra": extra, "run": run, "out": out}
             self.tool_stack.addWidget(panel)
+        for title, panel in self.build_toolkit_panels():
+            self.tool_nav.addItem(title)
+            self.tool_nav.item(self.tool_nav.count() - 1).setSizeHint(QSize(170, 36))
+            self.tool_stack.addWidget(panel)
         self.tool_nav.currentRowChanged.connect(self.tool_stack.setCurrentIndex)
+        self.tool_nav.currentRowChanged.connect(
+            lambda row: self.toolkit_tool_changed(self.tool_nav.item(row).text() if row >= 0 else ""))
         self.tool_nav.setCurrentRow(0)
         card, cl, _ = make_card("Tools")
         body = QHBoxLayout()

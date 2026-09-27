@@ -125,6 +125,9 @@ class InternetMixin:
         return rec.get("nickname") or (h or {}).get("hostname") or rec.get("hostname", "")
 
     def worker_done(self, tag, res):
+        if tag.startswith("tk:"):
+            self.toolkit_done(tag[3:], res)
+            return
         if tag == "uptime":
             if not isinstance(res, Exception):
                 self.uptime_result(res)

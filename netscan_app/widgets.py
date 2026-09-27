@@ -142,9 +142,9 @@ class Pinger(QObject):
 
     result = Signal(str, float, object)  # ip, time.time(), ms or None
 
-    def __init__(self):
+    def __init__(self, workers=MONITOR_MAX):
         super().__init__()
-        self.pool = ThreadPoolExecutor(max_workers=MONITOR_MAX)
+        self.pool = ThreadPoolExecutor(max_workers=workers)
         self.busy = set()
 
     def ping(self, ips):
@@ -600,3 +600,107 @@ class Resolver(QObject):
 
     # Bounded, so a /16 doesn't start thousands of threads at once.
     pool = ThreadPoolExecutor(max_workers=32)
+
+
+class TrafficChart(QWidget):
+    """This computer's download/upload rate over the last couple of minutes, for one interface.
+
+    Two series in the first two categorical colours, named at the line ends (never colour alone),
+    one axis (Mbit/s), crosshair tooltip on hover.
+    """
+
+    LEFT, RIGHT, TOP, BOTTOM = 64, 150, 14, 26
+    SPAN = 120  # seconds shown
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window  # MainWindow: traffic_samples() -> [(time, down Mbit/s, up Mbit/s)]
+        self.hover_x = None
+        self.setMouseTracking(True)
+        self.setMinimumHeight(220)
+
+    def leaveEvent(self, _event):
+        self.hover_x = None
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        self.hover_x = event.position().x()
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        small = QFont(self.font())
+        small.setPointSizeF(max(7.5, small.pointSizeF() * 0.85))
+        p.setFont(small)
+        samples = self.window.traffic_samples()
+        r = QRectF(self.LEFT, self.TOP, max(10, self.width() - self.LEFT - self.RIGHT),
+                   max(10, self.height() - self.TOP - self.BOTTOM))
+        if len(samples) < 2:
+            p.setPen(QColor(T.MUTED))
+            p.drawText(self.rect(), Qt.AlignCenter, "Measuring…")
+            return
+        now = time.time()
+        t0 = now - self.SPAN
+        peak = max(max(d, u) for _t, d, u in samples)
+        tick_values, top = LatencyChart.ticks(max(peak * 1.15, 0.1))
+        x_of = lambda t: r.left() + (t - t0) / self.SPAN * r.width()
+        y_of = lambda v: r.bottom() - v / top * r.height()
+        p.setPen(QPen(QColor(T.BORDER), 1))
+        for v in tick_values:
+            y = y_of(v)
+            p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+            p.setPen(QColor(T.MUTED))
+            p.drawText(QRectF(0, y - 8, self.LEFT - 6, 16), Qt.AlignRight | Qt.AlignVCenter, f"{v:g} Mbit/s")
+            p.setPen(QPen(QColor(T.BORDER), 1))
+        for i in (0, 30, 60, 90, 120):
+            p.setPen(QColor(T.MUTED))
+            p.drawText(QRectF(x_of(now - i) - 30, r.bottom() + 4, 60, 18), Qt.AlignHCenter | Qt.AlignTop,
+                       "now" if i == 0 else f"-{i}s")
+        colors = SERIES_COLORS[T.THEME]
+        labels = []
+        for idx, name in ((1, "Download"), (2, "Upload")):
+            pen = QPen(QColor(colors[idx - 1]), 2)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            path = QPainterPath()
+            for i, s in enumerate(samples):
+                pt = QPointF(x_of(s[0]), y_of(s[idx]))
+                path.lineTo(pt) if i else path.moveTo(pt)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
+            labels.append([y_of(samples[-1][idx]), colors[idx - 1], f"{name} {samples[-1][idx]:.2f}"])
+        labels.sort()
+        if len(labels) == 2 and labels[1][0] - labels[0][0] < 15:
+            labels[1][0] = labels[0][0] + 15
+        for y, color, text in labels:
+            p.setBrush(QColor(color))
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(QPointF(r.right() + 10, y), 4, 4)
+            p.setPen(QColor(T.TEXT))
+            p.drawText(QRectF(r.right() + 18, y - 8, self.RIGHT - 20, 16), Qt.AlignLeft | Qt.AlignVCenter, text)
+        if self.hover_x is not None and r.left() <= self.hover_x <= r.right():
+            t = t0 + (self.hover_x - r.left()) / r.width() * self.SPAN
+            near = min(samples, key=lambda s: abs(s[0] - t))
+            p.setPen(QPen(QColor(T.MUTED), 1, Qt.DashLine))
+            p.drawLine(QPointF(self.hover_x, r.top()), QPointF(self.hover_x, r.bottom()))
+            rows = [(colors[0], f"Download  {near[1]:.2f} Mbit/s"), (colors[1], f"Upload  {near[2]:.2f} Mbit/s")]
+            head = datetime.datetime.fromtimestamp(near[0]).strftime("%H:%M:%S")
+            fm = p.fontMetrics()
+            width = max(fm.horizontalAdvance(x) for _c, x in rows) + 40
+            bx = self.hover_x + 12 if self.hover_x + 12 + width < self.width() else self.hover_x - 12 - width
+            box = QRectF(bx, r.top() + 6, width, 22 + 18 * len(rows))
+            p.setPen(QPen(QColor(T.BORDER), 1))
+            p.setBrush(QColor(T.RAISED))
+            p.drawRoundedRect(box, 6, 6)
+            p.setPen(QColor(T.MUTED))
+            p.drawText(QRectF(box.left() + 10, box.top() + 4, width, 16), Qt.AlignLeft, head)
+            for i, (color, text) in enumerate(rows):
+                y = box.top() + 22 + 18 * i
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(color))
+                p.drawEllipse(QPointF(box.left() + 14, y + 8), 4, 4)
+                p.setPen(QColor(T.TEXT))
+                p.drawText(QRectF(box.left() + 24, y, width - 30, 16), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.end()

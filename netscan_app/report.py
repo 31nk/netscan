@@ -3,7 +3,7 @@
 import html
 
 from .devices import port_risk
-from .discovery import cert_note
+from .discovery import cert_note, likely_app
 from .scanning import port_label
 
 
@@ -49,7 +49,9 @@ def build_report(data):
         for m in h["upnp"]:
             attention.append(f"⚠ <b>{who}</b> opened internet port {m['external_port']}/{e(m['protocol'])} "
                              f"to its port {e(m['internal_port'])} via UPnP"
-                             + (f" ({e(m['description'])})" if m["description"] else "") + ".")
+                             + (f" ({e(m['description'])})" if m["description"] else "")
+                             + (f", likely {e(likely_app(m['protocol'], m['external_port']))}"
+                                if likely_app(m["protocol"], m["external_port"]) else "") + ".")
         for p in h["risky"]:
             attention.append(f"⚠ <b>{who}</b> has {e(port_label(p))} open: {e(port_risk(p))}.")
         for p in h["ports"] or []:
