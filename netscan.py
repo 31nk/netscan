@@ -42,11 +42,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import xml.etree.ElementTree as ET
 
 from PySide6.QtCore import (
-    QItemSelectionModel, QObject, QPointF, QProcess, QProcessEnvironment, QRectF, QSettings,
+    QItemSelectionModel, QObject, QPointF, QProcess, QProcessEnvironment, QRectF, QSettings, QSize,
     QStandardPaths, Qt, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
@@ -56,7 +57,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
-    QMessageBox, QPlainTextEdit, QScrollArea, QStackedWidget, QSystemTrayIcon, QTabBar, QToolTip,
+    QListWidget, QMessageBox, QPlainTextEdit, QScrollArea, QStackedWidget, QSystemTrayIcon, QTabBar,
+    QSizePolicy, QTextBrowser, QToolTip,
     QProgressBar, QPushButton, QSplitter, QStyleFactory, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -737,7 +739,8 @@ def _dns_name(buf, off):
 def parse_dns_records(buf):
     """Every resource record in a DNS message: (type, name, value).
 
-    PTR -> name, SRV -> (port, target), TXT -> [strings], A/AAAA -> address, others -> None.
+    PTR/NS/CNAME -> name, MX -> (preference, host), SRV -> (port, target), TXT -> [strings],
+    A/AAAA -> address, others -> None.
     """
     qd, an, ns, ar = struct.unpack(">4H", buf[4:12])
     off, records = 12, []
@@ -748,8 +751,10 @@ def parse_dns_records(buf):
         rtype, _cls, _ttl, length = struct.unpack(">HHIH", buf[off:off + 10])
         off += 10
         data = buf[off:off + length]
-        if rtype == 12:
+        if rtype in (2, 5, 12):  # NS, CNAME, PTR
             value = _dns_name(buf, off)[0]
+        elif rtype == 15 and length >= 3:  # MX: preference, mail server
+            value = (struct.unpack(">H", data[:2])[0], _dns_name(buf, off + 2)[0])
         elif rtype == 33 and length >= 7:
             value = (struct.unpack(">H", data[4:6])[0], _dns_name(buf, off + 6)[0])
         elif rtype == 16:
@@ -1480,9 +1485,11 @@ class DeviceStore:
                 data = json.load(f)
             self.devices = data.get("devices", {})
             self.checked_hours = data.get("checked_hours", [])
+            self.gateways = data.get("gateways", {})
         except (OSError, ValueError, AttributeError):
             self.devices = {}
             self.checked_hours = []
+            self.gateways = {}
         self._any_trusted = None
         self._deferred = 0
         self._dirty = False
@@ -1649,10 +1656,51 @@ class DeviceStore:
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"netscan_devices": 1, "devices": self.devices,
-                           "checked_hours": self.checked_hours}, f, indent=1)
+                           "checked_hours": self.checked_hours, "gateways": self.gateways}, f, indent=1)
             os.replace(tmp, self.path)
         except OSError:
             pass
+
+
+def spoof_check(store, net, hosts):
+    """Signs of ARP spoofing on this network. hosts: {ip: mac}. Returns [(severity, text)].
+
+    Remembers the router's MAC per network the first time; later a different MAC for the router,
+    or the router's MAC showing up on another address, is what an attacker in the middle looks like.
+    """
+    gw = net.get("gateway")
+    if not gw:
+        return []
+    warnings = []
+    key = f"{net['network']}|{gw}"
+    mac = hosts.get(gw) or neighbour_macs(net["iface"]).get(gw, "")
+    known = store.gateways.get(key)
+    if mac:
+        if known is None:
+            store.gateways[key] = {"mac": mac, "since": now_iso()}
+            store.save()
+        elif known["mac"] != mac:
+            warnings.append(("high", f"The router ({gw}) now answers from hardware address {mac}, not "
+                                     f"{known['mac']} as before. That's what ARP spoofing looks like (a device "
+                                     "posing as the router to intercept traffic), unless the router was replaced. "
+                                     "If it was, right-click the router → Accept this router."))
+    by_mac = {}
+    for ip, m in hosts.items():
+        if m and ":" not in ip:
+            by_mac.setdefault(m, []).append(ip)
+    router_mac = (known or {}).get("mac") or mac
+    for m, ips in by_mac.items():
+        if len(ips) < 2:
+            continue
+        ips = sorted(ips, key=ip_sort_key)
+        if m == router_mac:
+            others = [ip for ip in ips if ip != gw]
+            warnings.append(("high", f"{', '.join(others)} answers with the router's hardware address ({m}). A device "
+                                     "claiming the router's identity is a strong sign of ARP spoofing."))
+        else:
+            warnings.append(("low", f"One device ({m}) answers for {', '.join(ips)}. Fine if it's a device with "
+                                    "several addresses (servers, VMs, Docker); worth a look otherwise."))
+    return warnings
 
 
 class HistoryGrid(QWidget):
@@ -1866,6 +1914,11 @@ QPushButton::menu-indicator {{ image: url("{chevron}"); width: 12px; height: 12p
                                right: 8px; }}
 QPushButton#menuButton {{ padding-right: 28px; }}
 
+QTextBrowser {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px; padding: 8px; color: {TEXT}; }}
+QListWidget#toolNav {{ background: transparent; border: none; outline: 0; }}
+QListWidget#toolNav::item {{ padding: 8px 10px; border-radius: 8px; color: {MUTED}; }}
+QListWidget#toolNav::item:hover {{ background: {HOVER}; color: {TEXT}; }}
+QListWidget#toolNav::item:selected {{ background: {ACCENT}; color: #ffffff; }}
 QLineEdit, QComboBox, QPlainTextEdit {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px;
                         padding: 6px 10px; color: {TEXT}; selection-background-color: {ACCENT};
                         selection-color: #ffffff; }}
@@ -1917,7 +1970,7 @@ QSplitter::handle {{ background: transparent; }}
 QFrame#segment {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 11px; }}
 QTabBar#pages {{ background: transparent; }}
 QTabBar#pages::tab {{ background: transparent; color: {MUTED}; border: none; border-radius: 8px;
-                      padding: 7px 18px; margin: 3px; font-weight: 600; }}
+                      padding: 7px 14px; margin: 3px; font-weight: 600; }}
 QTabBar#pages::tab:hover:!selected {{ color: {TEXT}; background: {HOVER}; }}
 QTabBar#pages::tab:selected {{ background: {ACCENT}; color: #ffffff; }}
 
@@ -2372,6 +2425,8 @@ def build_report(data):
             attention.append(f"<b>{who}</b> isn't marked as trusted.")
         if h["new"]:
             attention.append(f"<b>{who}</b> was seen for the first time in this scan.")
+    for severity, text in data.get("spoof", []):
+        attention.insert(0, ("⚠ " if severity == "high" else "") + e(text))
     tiles = [(len(hosts), "devices", False),
              (sum(len(h["ports"] or []) for h in hosts if not h["this"]), "open ports on other devices", False),
              (sum(len(h["risky"]) for h in hosts), "risky ports", True),
@@ -2505,7 +2560,7 @@ def _speed_phase(one_request, streams=4, seconds=6.0, cap=None, warmup=0.5):
 
     Bytes from the first `warmup` seconds are ignored: a connection starts slow and ramps up.
     """
-    lock, state = threading.Lock(), {"total": 0, "counted": 0, "last": None}
+    lock, state = threading.Lock(), {"total": 0, "counted": 0, "last": None, "last_any": None}
     start = time.perf_counter()
     deadline = start + seconds
 
@@ -2513,6 +2568,7 @@ def _speed_phase(one_request, streams=4, seconds=6.0, cap=None, warmup=0.5):
         with lock:
             now = time.perf_counter()
             state["total"] += n
+            state["last_any"] = now
             if now - start >= warmup:
                 state["counted"] += n
                 state["last"] = now  # time is measured to the last byte, not to when connections close
@@ -2520,73 +2576,193 @@ def _speed_phase(one_request, streams=4, seconds=6.0, cap=None, warmup=0.5):
 
     def stream():
         while time.perf_counter() < deadline and (cap is None or state["total"] < cap):
-            if not one_request(add):
-                break
+            try:
+                if not one_request(add):
+                    break
+            except (OSError, http.client.HTTPException):
+                if state["total"]:
+                    break  # a stalled/reset connection mid-test just ends this stream
+                raise      # nothing got through at all (e.g. rate limited): a real failure
 
     with ThreadPoolExecutor(max_workers=streams) as ex:
         for f in [ex.submit(stream) for _ in range(streams)]:
             f.result()
-    elapsed = (state["last"] or time.perf_counter()) - start - warmup
-    return state["counted"] * 8 / max(elapsed, 0.1) / 1e6, state["total"]
+    if state["counted"] >= state["total"] * 0.25 and state["last"]:
+        elapsed = state["last"] - start - warmup
+        return state["counted"] * 8 / max(elapsed, 0.05) / 1e6, state["total"]
+    # Fast links can finish most of the data inside the warm-up; then measure the whole run.
+    elapsed = (state["last_any"] or time.perf_counter()) - start
+    return state["total"] * 8 / max(elapsed, 0.05) / 1e6, state["total"]
 
 
 SPEED_BASE = "https://speed.cloudflare.com"
+# Bufferbloat grades by how much latency rises while the connection is busy (ms), as speed-test sites use.
+BLOAT_GRADES = [(5, "A+"), (30, "A"), (60, "B"), (200, "C"), (400, "D")]
 
 
-def speed_test(base=SPEED_BASE):
-    """Download then upload through Cloudflare's speed test, 4 connections for ~6 s each; Mbit/s."""
+def bloat_grade(added_ms):
+    return next((g for limit, g in BLOAT_GRADES if added_ms < limit), "F")
+
+
+def _median(values):
+    values = sorted(v for v in values if v is not None)
+    return values[len(values) // 2] if values else None
+
+
+def _latency_while(fn, target="1.1.1.1"):
+    """Run fn() while pinging target every ~0.25 s; returns (fn's result, [ms…])."""
+    samples, stop = [], threading.Event()
+
+    def loop():
+        while not stop.is_set():
+            samples.append(ping_once(target))
+            stop.wait(0.25)
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    try:
+        return fn(), samples
+    finally:
+        stop.set()
+        t.join(2)
+
+
+LIBRESPEED_LIST = "https://librespeed.org/backend-servers/servers.php"
+SPEED_PROVIDERS = [("auto", "Automatic"), ("cloudflare", "Cloudflare"), ("librespeed", "LibreSpeed (nearest)")]
+_LIBRESPEED = {"list": None, "best": None}
+
+
+def librespeed_nearest():
+    """The public LibreSpeed server that answers fastest from here: {"name", "down", "up"} URLs.
+
+    The choice is remembered for the session and only re-checked, not searched for again.
+    """
+    best = _LIBRESPEED["best"]
+    if best:
+        try:  # by IP: this network's DNS can be slow, and the name was already resolved
+            socket.create_connection(best["addr"], timeout=1.5).close()
+            return best
+        except OSError:
+            _LIBRESPEED["best"] = None  # gone: search again
+    if _LIBRESPEED["list"] is None:
+        req = urllib.request.Request(LIBRESPEED_LIST, headers={"User-Agent": "NetScan"})
+        _LIBRESPEED["list"] = json.loads(urllib.request.urlopen(req, timeout=8).read(500_000))
+    servers = [s for s in _LIBRESPEED["list"] if s.get("server", "").startswith("https://")]
+
+    def rtt(s):
+        """Best of 3 TCP connects (≈ one round trip), with the name resolved once."""
+        u = urllib.parse.urlparse(s["server"])
+        try:
+            addr = socket.getaddrinfo(u.hostname, u.port or 443, type=socket.SOCK_STREAM)[0][4]
+        except OSError:
+            return None
+        best = None
+        for _ in range(3):
+            t = time.perf_counter()
+            try:
+                socket.create_connection(addr[:2], timeout=1.0).close()
+            except OSError:
+                return None
+            ms = (time.perf_counter() - t) * 1000
+            best = ms if best is None else min(best, ms)
+        return best, addr[:2]
+
+    # Some servers' names take ~10 s to fail to resolve on some networks; don't wait for those.
+    ex = ThreadPoolExecutor(max_workers=len(servers) or 1)
+    futures = {ex.submit(rtt, srv): srv for srv in servers}
+    done, _pending = concurrent.futures.wait(futures, timeout=6.0)  # returns early once all have answered
+    ex.shutdown(wait=False, cancel_futures=True)
+    timed = [(f.result()[0], f.result()[1], futures[f]) for f in done if f.result() is not None]
+    if not timed:
+        raise OSError("no LibreSpeed server answered")
+    ms, addr, s = min(timed, key=lambda x: x[0])
+    base = s["server"].rstrip("/") + "/"
+    _LIBRESPEED["best"] = {"name": f"{s['name']} (LibreSpeed)", "ms": ms, "addr": addr,
+                           "down": urllib.parse.urljoin(base, s["dlURL"]) + "?ckSize=25",  # 25 MB per request
+                           "up": urllib.parse.urljoin(base, s["ulURL"])}
+    return _LIBRESPEED["best"]
+
+
+def speed_test(base=SPEED_BASE, download_phase=True, provider="auto"):
+    """Download then upload, 4 / 2 connections for ~6 s each; Mbit/s plus a bufferbloat grade.
+
+    provider: 'cloudflare', 'librespeed' (nearest public server), or 'auto' = Cloudflare, falling back to
+    LibreSpeed if Cloudflare refuses (it rate-limits connections that test a lot) or can't be reached.
+    """
+    if provider == "librespeed":
+        return _speed_run(librespeed_nearest(), download_phase)
+    cloudflare = {"name": "Cloudflare", "down": f"{base}/__down?bytes=25000000", "up": f"{base}/__up"}
+    if provider == "cloudflare":
+        return _speed_run(cloudflare, download_phase)
+    try:
+        return _speed_run(cloudflare, download_phase)
+    except (OSError, http.client.HTTPException) as e:
+        why = "rate-limited" if isinstance(e, urllib.error.HTTPError) and e.code == 429 else "unreachable"
+        result = _speed_run(librespeed_nearest(), download_phase)
+        result["note"] = f"Cloudflare was {why}, so this used the nearest LibreSpeed server."
+        return result
+
+
+def _speed_run(server, download_phase=True):
     ctx = ssl.create_default_context()
     agent = {"User-Agent": "NetScan"}  # Cloudflare's speed test refuses Python's default user agent
 
     def download(add):
-        req = urllib.request.Request(f"{base}/__down?bytes=25000000", headers=agent)
-        with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+        req = urllib.request.Request(server["down"], headers=agent)
+        with urllib.request.urlopen(req, timeout=6, context=ctx) as r:
             while chunk := r.read(65536):
                 if not add(len(chunk)):
                     return False
         return True
 
     block = os.urandom(1_000_000)  # random, so nothing along the way can compress it
-    size = 25_000_000
+    size = 8_000_000
+    phase = {"deadline": 0.0}
 
     class Stop(Exception):
-        """Raised from inside the upload to abort it at the deadline (a short body would just hang)."""
+        """Raised from inside an upload to abort it once the phase is over."""
 
     class Body:
-        """Upload body counted as it's sent (one big upload per connection, like curl), stops at the deadline."""
+        """Upload body; stops mid-way when the phase's time is up."""
 
-        def __init__(self, add):
-            self.add, self.sent, self.go = add, 0, True
+        def __init__(self):
+            self.sent = 0
 
         def read(self, n=65536):
-            if not self.go:
+            if time.perf_counter() > phase["deadline"]:
                 raise Stop
             if self.sent >= size:
                 return b""
             start = self.sent % len(block)
             piece = block[start:start + min(n, size - self.sent, len(block) - start)]
             self.sent += len(piece)
-            self.go = self.add(len(piece))
             return piece
 
     def upload(add):
-        body = Body(add)
-        req = urllib.request.Request(f"{base}/__up", data=body, method="POST",
+        req = urllib.request.Request(server["up"], data=Body(), method="POST",
                                      headers={"Content-Type": "application/octet-stream",
                                               "Content-Length": str(size), **agent})
         try:
-            with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+            with urllib.request.urlopen(req, timeout=6, context=ctx) as r:
                 r.read()
         except Stop:
             return False
-        except (OSError, http.client.HTTPException):
-            if body.go:
-                raise  # a real failure, not us stopping at the deadline
-        return body.go
+        # Counted only once the server says it has everything: bytes handed to the network sit in
+        # local buffers for a while, so counting them as they're written overstates upload speed.
+        return add(size)
 
-    down, down_bytes = _speed_phase(download, cap=SPEED_DOWN_BYTES)
-    up, up_bytes = _speed_phase(upload, streams=2, cap=SPEED_UP_BYTES)
-    return {"down": down, "up": up, "used_mb": (down_bytes + up_bytes) / 1e6,
+    idle = _median([ping_once("1.1.1.1") for _ in range(5)])
+    (down, down_bytes), down_pings = (_latency_while(lambda: _speed_phase(download, cap=SPEED_DOWN_BYTES))
+                                      if download_phase else ((0.0, 0), []))
+    phase["deadline"] = time.perf_counter() + 6
+    (up, up_bytes), up_pings = _latency_while(lambda: _speed_phase(upload, streams=2, cap=SPEED_UP_BYTES,
+                                                                   warmup=0))
+    loaded = {"down": _median(down_pings), "up": _median(up_pings)}
+    worst = max((v for v in loaded.values() if v is not None), default=None)
+    added = max(0.0, worst - idle) if worst is not None and idle is not None else None
+    return {"server": server["name"], "down": down, "up": up, "used_mb": (down_bytes + up_bytes) / 1e6,
+            "idle_ms": idle, "loaded_ms": loaded, "added_ms": added,
+            "grade": bloat_grade(added) if added is not None else None,
             "when": datetime.datetime.now().strftime("%H:%M:%S")}
 
 
@@ -2606,6 +2782,332 @@ class Worker(QObject):
             except RuntimeError:
                 pass  # window already closed
         threading.Thread(target=go, daemon=True).start()
+
+
+# ---- tools tab: DNS, port check, IP info, HTTP inspector, subnet, MAC, Wi-Fi ------
+
+DNS_TYPES = {"A": 1, "NS": 2, "CNAME": 5, "MX": 15, "TXT": 16, "AAAA": 28}
+DNS_RCODES = {0: "OK", 1: "format error", 2: "server failure", 3: "no such name (NXDOMAIN)",
+              4: "not implemented", 5: "refused"}
+
+
+def dns_query(server, name, qtype="A", timeout=3.0):
+    """Ask one DNS server directly (UDP). Returns (rcode, [(type name, value)], ms)."""
+    ident = int.from_bytes(os.urandom(2), "big")
+    question = b"".join(bytes([len(p)]) + p.encode("idna") for p in name.rstrip(".").split(".")) + b"\0"
+    packet = struct.pack(">6H", ident, 0x0100, 1, 0, 0, 0) + question + struct.pack(">HH", DNS_TYPES[qtype], 1)
+    family = socket.AF_INET6 if ":" in server else socket.AF_INET
+    with socket.socket(family, socket.SOCK_DGRAM) as s:
+        s.settimeout(timeout)
+        t = time.perf_counter()
+        s.sendto(packet, (server, 53))
+        while True:
+            data, _ = s.recvfrom(65535)
+            if data[:2] == packet[:2]:  # ignore stray replies
+                break
+        ms = (time.perf_counter() - t) * 1000
+    rcode = data[3] & 0x0F
+    names = {v: k for k, v in DNS_TYPES.items()}
+    answers = []
+    an = struct.unpack(">H", data[6:8])[0]
+    for rtype, _name, value in parse_dns_records(data)[:an]:
+        if rtype in names and value is not None:
+            answers.append((names[rtype], value))
+    return rcode, answers, ms
+
+
+BLOCKED_ANSWERS = {"0.0.0.0", "::", "127.0.0.1", "::1"}
+
+
+def doh_query(name, qtype="A"):
+    """Cloudflare over DNS-over-HTTPS: works through VPNs that block other DNS servers, can't be altered in transit.
+    Same return shape as dns_query."""
+    names = {v: k for k, v in DNS_TYPES.items()}
+    url = "https://1.1.1.1/dns-query?" + urllib.parse.urlencode({"name": name, "type": qtype})
+    req = urllib.request.Request(url, headers={"Accept": "application/dns-json", "User-Agent": "NetScan"})
+    t = time.perf_counter()
+    with urllib.request.urlopen(req, timeout=6) as r:
+        d = json.loads(r.read(1_000_000))
+    ms = (time.perf_counter() - t) * 1000
+    answers = []
+    for a in d.get("Answer", []):
+        kind, data = names.get(a.get("type")), a.get("data", "")
+        if kind == "MX":
+            pref, _, host = data.partition(" ")
+            answers.append((kind, (int(pref), host.rstrip("."))))
+        elif kind == "TXT":
+            answers.append((kind, re.findall(r'"((?:[^"\\]|\\.)*)"', data) or [data]))
+        elif kind:
+            answers.append((kind, data.rstrip(".")))
+    return d.get("Status", 2), answers, ms
+
+
+def dns_tool(name, qtype):
+    """Look a name up on your DNS and on Cloudflare; spot blocking and hijacking."""
+    mine = (dns_servers() or ["1.1.1.1"])[0]
+    out = {"name": name, "type": qtype, "servers": {}}
+    for label, server, ask in (("yours", mine, lambda: dns_query(mine, name, qtype)),
+                               ("cloudflare", "1.1.1.1 (DNS-over-HTTPS)", lambda: doh_query(name, qtype))):
+        try:
+            out["servers"][label] = (server,) + ask()
+        except (OSError, ValueError, UnicodeError, http.client.HTTPException) as e:
+            out["servers"][label] = (server, None, [], None, str(e))
+    # NXDOMAIN hijacking: a made-up name should not exist; some ISPs answer with their ad server.
+    try:
+        rcode, answers, _ = dns_query(mine, f"netscan-{os.urandom(5).hex()}.com", "A")
+        out["hijack"] = rcode == 0 and bool(answers)
+    except (OSError, ValueError):
+        out["hijack"] = None
+    return out
+
+
+def port_check(host, spec, timeout=2.0):
+    """TCP connect to each port: {"ip", "results": [(port, "open"|"closed"|"no answer", service)]}."""
+    ip = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)[0][4][0]
+    ports = sorted(port_set(spec))[:1024]
+
+    def one(port):
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        with socket.socket(family, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            try:
+                state = "open" if s.connect_ex((ip, port)) == 0 else "closed"
+            except socket.timeout:
+                state = "no answer"
+            except OSError:
+                state = "closed"
+        try:
+            service = socket.getservbyport(port, "tcp")
+        except OSError:
+            service = ""
+        return port, state, service
+
+    with ThreadPoolExecutor(max_workers=64) as ex:
+        return {"host": host, "ip": ip, "results": list(ex.map(one, ports))}
+
+
+def ip_info(query):
+    """Owner of an IP from the public RDAP registries, plus its reverse DNS name."""
+    ip = socket.getaddrinfo(query, None)[0][4][0]
+    addr = ipaddress.ip_address(ip)
+    info = {"ip": ip, "rdns": ""}
+    try:
+        info["rdns"] = socket.gethostbyaddr(ip)[0]
+    except OSError:
+        pass
+    if not addr.is_global:
+        info["private"] = ("a private/local address (your LAN or a VPN)" if addr.is_private else
+                           "a special-purpose address")
+        return info
+    req = urllib.request.Request(f"https://rdap.org/ip/{ip}", headers={"User-Agent": "NetScan",
+                                                                        "Accept": "application/rdap+json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        d = json.loads(r.read(1_000_000))
+    orgs = []
+    for ent in d.get("entities", []):
+        vcard = ent.get("vcardArray", [None, []])[1]
+        fn = next((v[3] for v in vcard if v and v[0] == "fn"), "")
+        if fn and fn not in orgs:
+            orgs.append(fn)
+    info.update({"name": d.get("name", ""), "handle": d.get("handle", ""), "country": d.get("country", ""),
+                 "range": f"{d.get('startAddress', '')} – {d.get('endAddress', '')}", "orgs": orgs[:4],
+                 "registry": (d.get("port43") or "").replace("whois.", "").upper()})
+    return info
+
+
+SECURITY_HEADERS = {
+    "strict-transport-security": "forces HTTPS on later visits",
+    "content-security-policy": "limits what scripts and content can load",
+    "x-frame-options": "stops the site being framed (clickjacking)",
+    "x-content-type-options": "stops browsers guessing file types",
+    "referrer-policy": "controls what the site leaks in links",
+    "permissions-policy": "restricts camera, microphone, location…",
+}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def http_inspect(url):
+    """Redirect chain, final headers, missing security headers, and the certificate's validity."""
+    if "://" not in url:
+        url = "https://" + url
+    lenient = ssl.create_default_context()
+    lenient.check_hostname = False
+    lenient.verify_mode = ssl.CERT_NONE  # still inspect LAN devices with self-signed certs
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=lenient))
+    chain = []
+    for _ in range(8):
+        req = urllib.request.Request(url, headers={"User-Agent": "NetScan"}, method="GET")
+        t = time.perf_counter()
+        try:
+            r = opener.open(req, timeout=10)
+            status, headers = r.status, r.headers
+            r.close()
+        except urllib.error.HTTPError as e:
+            status, headers = e.code, e.headers
+        chain.append({"url": url, "status": status, "ms": (time.perf_counter() - t) * 1000})
+        location = headers.get("Location")
+        if status in (301, 302, 303, 307, 308) and location:
+            url = urllib.parse.urljoin(url, location)
+            continue
+        break
+    final = urllib.parse.urlparse(chain[-1]["url"])
+    out = {"chain": chain, "headers": dict(headers.items()),
+           "missing": [h for h in SECURITY_HEADERS if h not in {k.lower() for k in headers.keys()}]}
+    if final.scheme == "https":
+        host, port = final.hostname, final.port or 443
+        out["cert"] = tls_certificate(host, port)
+        try:  # does it pass the normal browser check?
+            with socket.create_connection((host, port), timeout=5) as raw, \
+                    ssl.create_default_context().wrap_socket(raw, server_hostname=host):
+                out["cert_valid"] = True
+        except ssl.SSLCertVerificationError as e:
+            out["cert_valid"] = e.verify_message or str(e)
+        except OSError as e:
+            out["cert_valid"] = str(e)
+    return out
+
+
+def subnet_info(text):
+    """Everything about a network (CIDR) or an address with a prefix."""
+    iface = ipaddress.ip_interface(text.strip())
+    net = iface.network
+    hosts = net.num_addresses - (2 if net.version == 4 and net.prefixlen < 31 else 0)
+    rows = [("Network", f"{net.network_address}/{net.prefixlen}"),
+            ("Netmask", str(net.netmask)), ("Wildcard (Cisco ACL)", str(net.hostmask)),
+            ("Usable addresses", f"{hosts:,}")]
+    if net.version == 4:
+        first = net.network_address + (1 if net.prefixlen < 31 else 0)
+        last = net.broadcast_address - (1 if net.prefixlen < 31 else 0)
+        rows += [("First usable", str(first)), ("Last usable", str(last)), ("Broadcast", str(net.broadcast_address))]
+    else:
+        rows += [("First", str(net.network_address)), ("Last", str(net.broadcast_address))]
+    rows += [("Type", "private" if net.is_private else "public" if net.is_global else "special-purpose")]
+    if iface.ip != net.network_address:
+        rows.insert(0, ("Address", str(iface.ip)))
+    return rows
+
+
+def mac_info(text):
+    mac = parse_mac(text)
+    if not mac:
+        raise ValueError("That isn't a MAC address (e.g. AA:BB:CC:DD:EE:FF).")
+    first = int(mac[:2], 16)
+    rows = [("MAC", mac), ("Manufacturer prefix (OUI)", mac[:8])]
+    if first & 0x02:
+        rows.append(("Manufacturer", "none: this is a private/randomised address (phones and laptops use "
+                                     "these per network for privacy)"))
+    else:
+        rows.append(("Manufacturer", mac_vendor(mac) or "unknown (not in nmap's list)"))
+    rows.append(("Kind", "multicast/group address" if first & 0x01 else "single device"))
+    return rows
+
+
+def _split_nmcli(line):
+    """Split nmcli terse output on ':' that isn't escaped as '\\:'."""
+    parts, cur, esc = [], "", False
+    for ch in line:
+        if esc:
+            cur, esc = cur + ch, False
+        elif ch == "\\":
+            esc = True
+        elif ch == ":":
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return parts + [cur]
+
+
+def wifi_band(freq_mhz):
+    return "6 GHz" if freq_mhz >= 5925 else "5 GHz" if freq_mhz >= 4900 else "2.4 GHz"
+
+
+def wifi_scan():
+    """This computer's Wi-Fi link and the networks around it: [{ssid, bssid, channel, freq, band, signal, security, active}]."""
+    nets = []
+    if IS_WIN:
+        cur = run_text("netsh", "wlan", "show", "interfaces")
+        cur_bssid = (re.search(r"BSSID\s*:\s*(\S+)", cur) or [None, ""])[1].lower()
+        ssid = None
+        for block in re.split(r"\r?\n(?=SSID \d+)", run_text("netsh", "wlan", "show", "networks", "mode=bssid")):
+            m = re.match(r"SSID \d+\s*:\s*(.*)", block)
+            if not m:
+                continue
+            ssid = m.group(1).strip()
+            sec = (re.search(r"Authentication\s*:\s*(.*)", block) or [None, ""])[1].strip()
+            for b in re.finditer(r"BSSID \d+\s*:\s*(\S+).*?Signal\s*:\s*(\d+)%.*?Channel\s*:\s*(\d+)", block, re.S):
+                ch = int(b.group(3))
+                freq = 2407 + 5 * ch if ch <= 14 else 5000 + 5 * ch
+                nets.append({"ssid": ssid, "bssid": b.group(1).lower(), "channel": ch, "freq": freq,
+                             "band": wifi_band(freq), "signal": int(b.group(2)), "security": sec,
+                             "active": b.group(1).lower() == cur_bssid})
+    elif IS_MAC:
+        out = run_text("/usr/sbin/system_profiler", "SPAirPortDataType")
+        section = "current"
+        for m in re.finditer(r"^\s{12}(\S.*?):\n(.*?)(?=^\s{12}\S|\Z)|^\s{10}(Other Local Wi-Fi Networks|Current Network Information):",
+                             out, re.M | re.S):
+            if m.group(3):
+                section = "other" if m.group(3).startswith("Other") else "current"
+                continue
+            body = m.group(2)
+            ch = re.search(r"Channel:\s*(\d+)", body)
+            if not ch:
+                continue
+            sig = re.search(r"Signal / Noise:\s*(-?\d+) dBm", body)
+            ch = int(ch.group(1))
+            freq = 2407 + 5 * ch if ch <= 14 else 5000 + 5 * ch
+            nets.append({"ssid": m.group(1), "bssid": "", "channel": ch, "freq": freq, "band": wifi_band(freq),
+                         "signal": min(100, max(0, 2 * (int(sig.group(1)) + 100))) if sig else None,
+                         "security": (re.search(r"Security:\s*(.*)", body) or [None, ""])[1].strip(),
+                         "active": section == "current"})
+    elif shutil.which("nmcli"):
+        out = run_text("nmcli", "-t", "-f", "ACTIVE,SSID,BSSID,CHAN,FREQ,RATE,SIGNAL,SECURITY", "dev", "wifi", "list")
+        for line in out.splitlines():
+            f = _split_nmcli(line)
+            if len(f) < 8:
+                continue
+            freq = int(re.sub(r"\D", "", f[4]) or 0)
+            nets.append({"ssid": f[1] or "(hidden)", "bssid": f[2].lower(), "channel": int(f[3] or 0), "freq": freq,
+                         "band": wifi_band(freq), "rate": f[5], "signal": int(f[6] or 0), "security": f[7] or "open",
+                         "active": f[0] == "yes"})
+    return sorted(nets, key=lambda n: (not n["active"], -(n["signal"] or 0)))
+
+
+def radio_family(bssid):
+    """Routers broadcast several networks (guest, mesh, hidden) from addresses that differ only in the
+    first and last byte; the middle four identify the router."""
+    parts = bssid.lower().split(":")
+    return ":".join(parts[1:5]) if len(parts) == 6 else bssid
+
+
+def channel_advice(nets):
+    """Per band: how many *other* routers sit on each channel, and the least crowded choice.
+
+    Your own router's extra networks don't count against you, and a router with several networks
+    on one channel counts once.
+    """
+    out = {}
+    active = next((n for n in nets if n["active"]), None)
+    own = radio_family(active["bssid"]) if active and active["bssid"] else None
+    for band, choices in (("2.4 GHz", (1, 6, 11)), ("5 GHz", None)):
+        here = [n for n in nets if n["band"] == band]
+        if not here:
+            continue
+        routers = {}
+        for n in here:
+            if active and (n["ssid"] == active["ssid"] or (own and radio_family(n["bssid"]) == own)):
+                continue
+            routers.setdefault(n["channel"], set()).add(radio_family(n["bssid"]) if n["bssid"] else n["ssid"])
+        counts = {ch: len(r) for ch, r in routers.items()}
+        mine = next((n["channel"] for n in here if n["active"]), None)
+        pool = choices or sorted(counts)
+        best = min(pool, key=lambda c: (counts.get(c, 0), c)) if pool else None
+        out[band] = {"counts": dict(sorted(counts.items())), "yours": mine, "best": best}
+    return out
 
 
 def traceroute_argv(target):
@@ -2679,6 +3181,35 @@ class TraceDialog(QDialog):
 
 
 MAP_GROUP_ORDER = ["computer", "pi", "nas", "phone", "media", "iot", "printer", "unknown"]
+
+
+class StatusLabel(QLabel):
+    """Status line: wraps to at most two lines, ending in … when longer; the full text is the tooltip."""
+
+    def __init__(self, text=""):
+        super().__init__()
+        self.setWordWrap(True)
+        self.full = ""
+        self.setText(text)
+
+    def setText(self, text):
+        self.full = text
+        self.setToolTip(text if len(text) > 120 else "")
+        self._fit()
+
+    def text(self):
+        return self.full
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit()
+
+    def _fit(self):
+        fm = self.fontMetrics()
+        budget = max(200, int(self.width() * 1.85))  # roughly two lines of the current width
+        shown = fm.elidedText(self.full, Qt.ElideRight, budget) if fm.horizontalAdvance(self.full) > budget else self.full
+        QLabel.setText(self, shown)
+        self.setFixedHeight(fm.lineSpacing() * (2 if fm.horizontalAdvance(shown) > self.width() else 1) + 4)
 
 
 class NetworkMap(QWidget):
@@ -2913,6 +3444,7 @@ class MainWindow(QMainWindow):
         self.ssdp_listener = SsdpListener()
         self.ssdp_listener.found.connect(self.ssdp_announced)
         self.upnp_pending = False
+        self.spoof_warnings = []
         self._icons = {}
         self.watch_proc = None
         self.networks = []
@@ -3014,6 +3546,7 @@ class MainWindow(QMainWindow):
         self.open_only_box.toggled.connect(self.apply_filter)
         self.count_label = QLabel("")
         self.count_label.setObjectName("pill")
+        self.count_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)  # never clip "13 host(s)"
 
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setHorizontalHeaderLabels([c.upper() for c in COLUMNS])
@@ -3090,8 +3623,7 @@ class MainWindow(QMainWindow):
         self.progress.setTextVisible(True)
         self.progress.hide()
         self.status_dot = QLabel("●")
-        self.status = QLabel("Ready.")
-        self.status.setWordWrap(True)
+        self.status = StatusLabel("Ready.")
 
         self.compare_btn = QPushButton("Compare…")
         self.compare_btn.setToolTip("Compare these results with a saved scan (.json)")
@@ -3133,15 +3665,18 @@ class MainWindow(QMainWindow):
         self.tabbar.setDrawBase(False)
         self.tabbar.setExpanding(False)
         self.tabbar.addTab("Scan")
-        self.tabbar.addTab("Devices && Wake-on-LAN")
+        self.tabbar.addTab("Devices")
         self.tabbar.addTab("Monitor")
         self.tabbar.setTabToolTip(2, "Ping devices over time: latency, jitter and packet loss (Ctrl+3)")
         self.tabbar.addTab("Internet")
         self.tabbar.setTabToolTip(3, "Public IP, VPN check, DNS, latency and a speed test (Ctrl+4)")
         self.tabbar.addTab("Map")
         self.tabbar.setTabToolTip(4, "Every device around your router, grouped by type (Ctrl+5)")
+        self.tabbar.addTab("Tools")
+        self.tabbar.setTabToolTip(5, "DNS lookup, port check, IP info, HTTP inspector, subnet, MAC, Wi-Fi (Ctrl+6)")
         self.tabbar.setTabToolTip(0, "Find hosts and scan ports (Ctrl+1)")
-        self.tabbar.setTabToolTip(1, "Every device NetScan has seen: nicknames, wake, watch (Ctrl+2)")
+        self.tabbar.setTabToolTip(1, "Every device NetScan has seen: nicknames, Wake-on-LAN, watch, uptime alerts "
+                                     "(Ctrl+2)")
         segment = QFrame()
         segment.setObjectName("segment")
         sl = QHBoxLayout(segment)
@@ -3193,6 +3728,7 @@ class MainWindow(QMainWindow):
         self.net_map = NetworkMap(self)
         ml.addWidget(self.net_map, 1)
         self.pages.addWidget(map_card)
+        self.pages.addWidget(self.build_tools_page())
         self.tabbar.currentChanged.connect(self.switch_page)
 
         body.addLayout(head)
@@ -3213,13 +3749,17 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.tick)
         self.watch_timer = QTimer(self)
         self.watch_timer.timeout.connect(self.watch_scan)
+        self.uptime_timer = QTimer(self)
+        self.uptime_timer.timeout.connect(self.uptime_tick)
+        self.uptime_state = {}  # mac -> {"up", "misses", "down_since"}
 
         for keys, slot in (("F5", self.shortcut_scan), (QKeySequence.Find, self.focus_filter),
                            ("Ctrl+1", lambda: self.tabbar.setCurrentIndex(0)),
                            ("Ctrl+2", lambda: self.tabbar.setCurrentIndex(1)),
                            ("Ctrl+3", lambda: self.tabbar.setCurrentIndex(2)),
                            ("Ctrl+4", lambda: self.tabbar.setCurrentIndex(3)),
-                           ("Ctrl+5", lambda: self.tabbar.setCurrentIndex(4))):
+                           ("Ctrl+5", lambda: self.tabbar.setCurrentIndex(4)),
+                           ("Ctrl+6", lambda: self.tabbar.setCurrentIndex(5))):
             act = QAction(self)
             act.setShortcut(QKeySequence(keys))
             act.triggered.connect(slot)
@@ -3248,6 +3788,7 @@ class MainWindow(QMainWindow):
         self.refresh_devices()
         self.watch_combo.currentIndexChanged.connect(self.set_watch)
         self.set_watch(first_delay=5000)
+        self.uptime_restart()
 
     # ---- settings ----------------------------------------------------------
 
@@ -3262,6 +3803,7 @@ class MainWindow(QMainWindow):
         self.watch_ports_box.setChecked(b("watch_ports", False))
         self.mon_interval.setCurrentIndex(min(s.value("monitor_interval", 0, type=int), self.mon_interval.count() - 1))
         self.mon_span.setCurrentIndex(min(s.value("monitor_span", 0, type=int), self.mon_span.count() - 1))
+        self.speed_provider.setCurrentIndex(min(s.value("speed_provider", 0, type=int), self.speed_provider.count() - 1))
         if s.contains("dev_split"):
             self.dev_split.restoreState(s.value("dev_split"))
         self.udp_box.setChecked(b("udp", False))
@@ -3285,6 +3827,7 @@ class MainWindow(QMainWindow):
         s.setValue("watch_ports", self.watch_ports_box.isChecked())
         s.setValue("monitor_interval", self.mon_interval.currentIndex())
         s.setValue("monitor_span", self.mon_span.currentIndex())
+        s.setValue("speed_provider", self.speed_provider.currentIndex())
         s.setValue("theme", self.theme_mode)
         s.setValue("dev_split", self.dev_split.saveState())
         s.setValue("udp", self.udp_box.isChecked())
@@ -3583,6 +4126,7 @@ class MainWindow(QMainWindow):
                             self.devices.update_ports(h["mac"], self.network_ports(ip), top)
             if self.current:
                 self.online_macs = {h["mac"] for h in self.hosts.values() if h["mac"]}
+                self.run_spoof_check({ip: h["mac"] for ip, h in self.hosts.items()})
             for ip, h in self.hosts.items():
                 rec = self.devices.get(h)
                 for key in ("hostname",) + DISCOVERY_FIELDS:  # remembered names, models, services
@@ -3622,7 +4166,11 @@ class MainWindow(QMainWindow):
         self.summary += self.risk_summary(self.hosts)
         if self.new_devices:
             self.summary += f" {len(self.new_devices)} device(s) never seen before."
+        for severity, text in self.spoof_warnings:
+            self.summary += (" ⚠ " if severity == "high" else " Note: ") + text
         self.update_status()
+        if self.spoof_warnings and any(sv == "high" for sv, _t in self.spoof_warnings):
+            self.set_dot(RED)
         if self.current:
             self.start_discovery(names=True, ips=list(self.hosts))
 
@@ -4133,6 +4681,21 @@ class MainWindow(QMainWindow):
         self.hosts[ip]["os"] = self.hosts[ip].get("os") or this_os_name()
         self.refresh_row(ip)
 
+    def run_spoof_check(self, macs, net=None):
+        self.spoof_warnings = spoof_check(self.devices, net or self.current, macs)
+
+    def accept_router(self):
+        """The router really was replaced: remember its new hardware address."""
+        net = self.current
+        gw = self.gateway()
+        mac = self.hosts.get(gw, {}).get("mac") or neighbour_macs(net["iface"]).get(gw, "")
+        if mac:
+            self.devices.gateways[f"{net['network']}|{gw}"] = {"mac": mac, "since": now_iso()}
+            self.devices.save()
+            self.spoof_warnings = [w for w in self.spoof_warnings if "now answers from" not in w[1]]
+            self.set_dot(GREEN)
+            self.status.setText(f"Remembered {mac} as this network's router.")
+
     def risk_summary(self, ips):
         bad = {ip: risky(self.ports.get(ip)) for ip in ips}
         bad = {ip: r for ip, r in bad.items() if r}
@@ -4244,6 +4807,9 @@ class MainWindow(QMainWindow):
                 trusted = self.devices.get(h).get("trusted")
                 menu.addAction("Unmark as trusted" if trusted else "Mark as trusted",
                                lambda: self.set_trusted([h["mac"]], not trusted))
+                important = self.devices.get(h).get("important")
+                menu.addAction("Stop offline alerts" if important else "Alert when offline",
+                               lambda: self.set_important([h["mac"]], not important))
             if h["mac"] and not (self.current and ip == self.current["local_ip"]):
                 menu.addAction("Wake-on-LAN", lambda: self.wake(h["mac"], self.devices.nickname(h)
                                                                   or h["hostname"] or ip))
@@ -4261,6 +4827,8 @@ class MainWindow(QMainWindow):
                 menu.addAction("VNC remote desktop", lambda: self.open_service("vnc", ip, vnc))
             if 22 in open_ports:
                 menu.addAction("Copy ssh command", lambda: self.copy_ssh(h))
+            if ip == self.gateway() and any("now answers from" in t for _s, t in self.spoof_warnings):
+                menu.addAction("Accept this router (it was replaced)", self.accept_router)
             if ip == self.gateway():
                 chk = menu.addAction("Check internet port forwards (UPnP)", self.check_upnp)
                 chk.setEnabled(not self.discovering)
@@ -4564,6 +5132,7 @@ class MainWindow(QMainWindow):
         # Known devices card
         self.dev_count = QLabel("")
         self.dev_count.setObjectName("pill")
+        self.dev_count.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         self.dev_filter = QLineEdit()
         self.dev_filter.setPlaceholderText("Filter by name, type, MAC, vendor, IP…")
         self.dev_filter.setClearButtonEnabled(True)
@@ -4690,11 +5259,17 @@ class MainWindow(QMainWindow):
         self.detail_trusted.setToolTip("Once any device is trusted, untrusted ones are highlighted "
                                        "on the Scan tab and can be filtered here.")
         self.detail_trusted.toggled.connect(self.detail_trusted_changed)
+        self.detail_important = QCheckBox("Alert when offline")
+        self.detail_important.setToolTip("NetScan pings it every 30 s while open and notifies you when it goes "
+                                         "down or comes back. Best for servers, NAS, Pis and printers; phones "
+                                         "sleep and ignore pings, so they'd look offline.")
+        self.detail_important.toggled.connect(self.detail_important_changed)
         row = QHBoxLayout()
         row.addWidget(self.field_label("Type"))
         row.addWidget(self.detail_type, 1)
         row.addSpacing(8)
         row.addWidget(self.detail_trusted)
+        row.addWidget(self.detail_important)
         bl.addLayout(row)
 
         grid = QGridLayout()
@@ -4718,6 +5293,11 @@ class MainWindow(QMainWindow):
         self.detail_legend = QLabel()
         self.detail_legend.setObjectName("muted")
         bl.addWidget(self.detail_legend)
+
+        bl.addWidget(self.field_label("Uptime alerts"))
+        self.detail_uptime = QLabel()
+        self.detail_uptime.setWordWrap(True)
+        bl.addWidget(self.detail_uptime)
 
         bl.addWidget(self.field_label("Port changes"))
         self.detail_changes = QLabel()
@@ -4795,6 +5375,21 @@ class MainWindow(QMainWindow):
         self.detail_trusted.blockSignals(True)
         self.detail_trusted.setChecked(bool(d.get("trusted")))
         self.detail_trusted.blockSignals(False)
+        self.detail_important.blockSignals(True)
+        self.detail_important.setChecked(bool(d.get("important")))
+        self.detail_important.blockSignals(False)
+        events = d.get("uptime_log", [])[-6:]
+        if not d.get("important"):
+            self.detail_uptime.setText(f'<span style="color:{MUTED}">Off. Tick “Alert when offline” to watch it.</span>')
+        elif not events:
+            self.detail_uptime.setText(f'<span style="color:{MUTED}">Watching; no outages recorded yet.</span>')
+        else:
+            self.detail_uptime.setText("<br>".join(
+                f'<span style="color:{MUTED}">{self.when_text(ev["time"])}</span> '
+                + (f'<span style="color:{AMBER}">went offline</span>' if ev["state"] == "down" else
+                   f'<span style="color:{GREEN}">back online</span>'
+                   + (f" after {ev['downtime']}" if ev.get("downtime") else ""))
+                for ev in reversed(events)))
 
         f = self.detail_fields
         f["First seen"].setText(self.when_text(d.get("first_seen")))
@@ -4881,6 +5476,10 @@ class MainWindow(QMainWindow):
             self.devices.set_field(self.devices.devices[self.detail_mac], "type",
                                    self.detail_type.currentData())
             self.after_device_change(self.detail_mac)
+
+    def detail_important_changed(self, on):
+        if self.detail_mac in self.devices.devices:
+            self.set_important([self.detail_mac], on)
 
     def detail_trusted_changed(self, on):
         if self.detail_mac:
@@ -5076,6 +5675,9 @@ class MainWindow(QMainWindow):
                 menu.addAction(f"SSH to {user}@{d['ip']}" if user else f"SSH to {d['ip']}…",
                                lambda: self.ssh_to(host))
             menu.addAction("Copy ssh command", lambda: self.copy_ssh(host))
+        all_important = all(self.devices.devices.get(m, {}).get("important") for m in macs)
+        menu.addAction("Stop offline alerts" if all_important else "Alert when offline",
+                       lambda: self.set_important(macs, not all_important))
         menu.addAction("Copy MAC address" + ("es" if len(macs) > 1 else ""),
                        lambda: QGuiApplication.clipboard().setText("\n".join(macs)))
         menu.addSeparator()
@@ -5293,6 +5895,297 @@ class MainWindow(QMainWindow):
         t.setColumnWidth(0, 30)
         self.monitor_buttons()
 
+    # ---- uptime alerts ---------------------------------------------------------------
+
+    UPTIME_EVERY_MS, UPTIME_MISSES = 30_000, 2
+
+    def set_important(self, macs, on):
+        with self.devices.batch():
+            for mac in macs:
+                rec = self.devices.devices.get(mac)
+                if rec is not None:
+                    self.devices.set_field(rec, "important", on)
+                    self.uptime_state.pop(mac, None)
+        self.refresh_devices()
+        self.uptime_restart()
+        self.status.setText(("Watching " if on else "Stopped watching ")
+                            + ", ".join(self.device_label(m) or m for m in macs) + " for outages.")
+
+    def uptime_targets(self):
+        """{mac: ip} of devices marked important, at their latest known IPv4 address."""
+        current = {h["mac"]: ip for ip, h in self.hosts.items() if h["mac"] and ":" not in ip}
+        return {mac: current.get(mac) or d.get("ip") for mac, d in self.devices.devices.items()
+                if d.get("important") and (current.get(mac) or ":" not in (d.get("ip") or ":"))}
+
+    def uptime_restart(self):
+        if self.uptime_targets():
+            if not self.uptime_timer.isActive():
+                self.uptime_timer.start(self.UPTIME_EVERY_MS)
+                QTimer.singleShot(2000, self.uptime_tick)
+        else:
+            self.uptime_timer.stop()
+
+    def uptime_tick(self):
+        targets = self.uptime_targets()
+        if not targets:
+            self.uptime_timer.stop()
+            return
+        self.worker.run("uptime", lambda: {mac: ping_summary(ip, count=2)[0] is not None
+                                           for mac, ip in targets.items()})
+
+    def uptime_result(self, alive):
+        for mac, up in alive.items():
+            st = self.uptime_state.setdefault(mac, {"up": True, "misses": 0, "down_since": None})
+            rec = self.devices.devices.get(mac)
+            if rec is None:
+                continue
+            name = self.device_label(mac) or rec.get("ip") or mac
+            if up:
+                st["misses"] = 0
+                self.online_macs.add(mac)
+                if not st["up"]:
+                    st["up"] = True
+                    gone = int(time.time() - (st["down_since"] or time.time()))
+                    took = f"{gone // 3600} h {gone % 3600 // 60} min" if gone >= 3600 else f"{max(1, gone // 60)} min"
+                    self.uptime_log(rec, "up", took)
+                    notify(f"{name} is back online", f"It was offline for about {took}.")
+                    self.status.setText(f"{name} is back online after about {took}.")
+            else:
+                st["misses"] += 1
+                if st["up"] and st["misses"] >= self.UPTIME_MISSES:
+                    st["up"], st["down_since"] = False, time.time()
+                    self.online_macs.discard(mac)
+                    self.uptime_log(rec, "down")
+                    notify(f"{name} went offline", f"{rec.get('ip', '')} stopped answering pings.")
+                    self.set_dot(AMBER)
+                    self.status.setText(f"⚠ {name} ({rec.get('ip', '')}) went offline.")
+        if self.tabbar.currentIndex() == 1:
+            self.refresh_devices()
+
+    def uptime_log(self, rec, state, downtime=None):
+        log = rec.setdefault("uptime_log", [])
+        log.append({"time": now_iso(), "state": state, **({"downtime": downtime} if downtime else {})})
+        rec["uptime_log"] = log[-50:]
+        self.devices.save()
+
+    # ---- tools tab -----------------------------------------------------------------
+
+    TOOLS = [
+        ("dns", "DNS lookup", "Look up a name on your DNS server and on Cloudflare (over HTTPS), and spot blocking "
+                              "(e.g. Pi-hole) or DNS hijacking.", "example.com"),
+        ("port", "Check ports", "Is a port open on any host, including servers outside your network? "
+                                "Ports: a list or ranges, e.g. 22,80,443 or 8000-8100.", "example.com"),
+        ("ip", "IP info", "Who owns a public IP address (from the public RDAP registries), and its reverse DNS name.",
+         "8.8.8.8"),
+        ("http", "HTTP inspector", "A website's redirects, security headers and certificate.", "https://example.com"),
+        ("subnet", "Subnet calculator", "Range, netmask, broadcast and host count for a network or address.",
+         "192.168.1.0/24"),
+        ("mac", "MAC lookup", "The manufacturer of a network card from its MAC address.", "AA:BB:CC:DD:EE:FF"),
+        ("wifi", "Wi-Fi", "This computer's Wi-Fi connection and the networks around it, with the least crowded "
+                          "channel.", ""),
+    ]
+
+    def build_tools_page(self):
+        self.tool_nav = QListWidget()
+        self.tool_nav.setObjectName("toolNav")
+        self.tool_nav.setFixedWidth(190)
+        self.tool_nav.setSpacing(1)
+        self.tool_stack = QStackedWidget()
+        self.tool_widgets = {}
+        for key, title, desc, placeholder in self.TOOLS:
+            self.tool_nav.addItem(title)
+            self.tool_nav.item(self.tool_nav.count() - 1).setSizeHint(QSize(170, 36))  # room for the padding
+            panel = QWidget()
+            lay = QVBoxLayout(panel)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(10)
+            head = QLabel(title)
+            head.setObjectName("bigName")
+            info = QLabel(desc)
+            info.setObjectName("muted")
+            info.setWordWrap(True)
+            row = QHBoxLayout()
+            edit = QLineEdit()
+            edit.setPlaceholderText(placeholder)
+            extra = None
+            if key == "dns":
+                extra = QComboBox()
+                extra.addItems(list(DNS_TYPES))
+            elif key == "port":
+                extra = QLineEdit("21,22,23,25,53,80,110,143,443,445,587,993,3306,3389,5432,8080,8443")
+                extra.setToolTip("Ports to check")
+            run = QPushButton("Scan Wi-Fi" if key == "wifi" else "Run")
+            run.setObjectName("primary")
+            if key != "wifi":
+                row.addWidget(edit, 2)
+                edit.returnPressed.connect(lambda k=key: self.run_tool(k))
+            if extra is not None:
+                row.addWidget(extra, 2 if key == "port" else 0)
+            if key == "wifi":
+                row.addStretch(1)
+            row.addWidget(run)
+            run.clicked.connect(lambda _c=False, k=key: self.run_tool(k))
+            out = QTextBrowser()
+            out.setOpenExternalLinks(False)
+            for w in (head, info):
+                lay.addWidget(w)
+            lay.addLayout(row)
+            lay.addWidget(out, 1)
+            self.tool_widgets[key] = {"edit": edit, "extra": extra, "run": run, "out": out}
+            self.tool_stack.addWidget(panel)
+        self.tool_nav.currentRowChanged.connect(self.tool_stack.setCurrentIndex)
+        self.tool_nav.setCurrentRow(0)
+        card, cl, _ = make_card("Tools")
+        body = QHBoxLayout()
+        body.setSpacing(16)
+        body.addWidget(self.tool_nav)
+        body.addWidget(self.tool_stack, 1)
+        cl.addLayout(body, 1)
+        return card
+
+    def run_tool(self, key):
+        w = self.tool_widgets[key]
+        text = w["edit"].text().strip()
+        try:
+            if key == "subnet":  # instant, no network
+                self.tool_done(key, {"rows": subnet_info(text or w["edit"].placeholderText())})
+                return
+            if key == "mac":
+                self.tool_done(key, {"rows": mac_info(text)})
+                return
+        except ValueError as e:
+            self.tool_done(key, e)
+            return
+        if key != "wifi" and not text:
+            text = w["edit"].placeholderText()
+            w["edit"].setText(text)
+        if key != "wifi" and not re.fullmatch(r"[\w.:/\-%?=&+~#@\[\]]{1,300}", text):
+            self.tool_done(key, ValueError("That doesn't look like a valid name, address or URL."))
+            return
+        w["run"].setEnabled(False)
+        w["out"].setHtml(f'<p style="color:{MUTED}">Working…</p>')
+        jobs = {"dns": lambda: dns_tool(text, w["extra"].currentText()),
+                "port": lambda: port_check(text, w["extra"].text().replace(" ", "")),
+                "ip": lambda: ip_info(text), "http": lambda: http_inspect(text),
+                "wifi": lambda: {"nets": wifi_scan()}}
+        if key == "port" and not valid_port_list(w["extra"].text().replace(" ", "")):
+            w["run"].setEnabled(True)
+            self.tool_done(key, ValueError("Ports must look like 22,80,443 or 8000-8100."))
+            return
+        self.worker.run("tool:" + key, jobs[key])
+
+    @staticmethod
+    def html_rows(rows, headers=None):
+        e = html.escape
+        head = ("<tr>" + "".join(f'<th align="left" style="color:{MUTED};padding:4px 14px 4px 0">{e(h)}</th>'
+                                 for h in headers) + "</tr>") if headers else ""
+        body = "".join("<tr>" + "".join(f'<td style="padding:3px 14px 3px 0">{c}</td>' for c in r) + "</tr>"
+                       for r in rows)
+        return f'<table cellspacing="0">{head}{body}</table>'
+
+    def tool_done(self, key, res):
+        w = self.tool_widgets[key]
+        w["run"].setEnabled(True)
+        e = html.escape
+        note = lambda text, color=None: f'<p style="color:{color or MUTED}">{text}</p>'
+        if isinstance(res, Exception):
+            msg = str(res.reason) if isinstance(res, urllib.error.URLError) else str(res)
+            w["out"].setHtml(note(f"⚠ {e(msg or type(res).__name__)}", AMBER))
+            return
+        if key in ("subnet", "mac"):
+            w["out"].setHtml(self.html_rows([(f'<span style="color:{MUTED}">{e(k)}</span>', f"<b>{e(v)}</b>")
+                                             for k, v in res["rows"]]))
+            return
+        if key == "dns":
+            fmt = lambda v: e(f"{v[0]} {v[1]}" if isinstance(v, tuple) else " ".join(v) if isinstance(v, list) else v)
+            rows, answers = [], {}
+            for label, (server, rcode, ans, ms, *err) in res["servers"].items():
+                answers[label] = {fmt(v) for _t, v in ans if _t == res["type"]}
+                status = (f'<span style="color:{AMBER}">⚠ {e(err[0])}</span>' if err else
+                          e(DNS_RCODES.get(rcode, str(rcode))) + f' <span style="color:{MUTED}">({ms:.0f} ms)</span>')
+                shown = "<br>".join(fmt(v) for _t, v in ans) or f'<span style="color:{MUTED}">no records</span>'
+                rows.append([f"<b>{'Your DNS' if label == 'yours' else 'Cloudflare'}</b><br>"
+                             f'<span style="color:{MUTED}">{e(server)}</span>', status, shown])
+            verdicts = []
+            mine, theirs = answers.get("yours", set()), answers.get("cloudflare", set())
+            if mine & BLOCKED_ANSWERS and theirs and not theirs & BLOCKED_ANSWERS:
+                verdicts.append(note("🛡 <b>Blocked by your DNS server</b> (it answers 0.0.0.0): typical of an ad "
+                                     "blocker like Pi-hole or AdGuard.", GREEN))
+            elif mine and theirs and not mine & theirs and res["type"] in ("A", "AAAA"):
+                verdicts.append(note("Your DNS gave different addresses from Cloudflare. That's normal for big sites "
+                                     "(they serve from many places), but worth a look for a small site or your bank."))
+            if res.get("hijack"):
+                verdicts.append(note("⚠ <b>Your DNS invents answers for names that don't exist</b> (NXDOMAIN "
+                                     "hijacking): usually an ISP sending mistyped addresses to its ad pages.", AMBER))
+            elif res.get("hijack") is False:
+                verdicts.append(note("✓ Your DNS answers “no such name” honestly (no NXDOMAIN hijacking).", GREEN))
+            w["out"].setHtml(f"<p><b>{e(res['name'])}</b> · {e(res['type'])} records</p>"
+                             + self.html_rows(rows, ["Server", "Status", "Answer"]) + "".join(verdicts))
+            return
+        if key == "port":
+            color = {"open": GREEN, "closed": MUTED, "no answer": AMBER}
+            rows = [(f"<b>{p}</b>", f'<span style="color:{color[st]}">{st}</span>', e(svc)) for p, st, svc in res["results"]]
+            n_open = sum(1 for _p, st, _s in res["results"] if st == "open")
+            w["out"].setHtml(f"<p><b>{e(res['host'])}</b> ({e(res['ip'])}): {n_open} of {len(rows)} open</p>"
+                             + self.html_rows(rows, ["Port", "State", "Usual service"])
+                             + note("“no answer” usually means a firewall silently drops the connection."))
+            return
+        if key == "ip":
+            if res.get("private"):
+                w["out"].setHtml(f"<p><b>{e(res['ip'])}</b> is {e(res['private'])}; the public registries "
+                                 "don't list these.</p>" + (note(f"Reverse DNS: {e(res['rdns'])}") if res["rdns"] else ""))
+                return
+            rows = [(k, e(v)) for k, v in (("Address", res["ip"]), ("Reverse DNS", res["rdns"] or "none"),
+                                           ("Owner", ", ".join(res["orgs"]) or "?"), ("Network name", res["name"]),
+                                           ("Range", res["range"]), ("Handle", res["handle"]),
+                                           ("Country", res["country"] or "?"), ("Registry", res["registry"] or "?"))]
+            w["out"].setHtml(self.html_rows([(f'<span style="color:{MUTED}">{k}</span>', f"<b>{v}</b>") for k, v in rows]))
+            return
+        if key == "http":
+            chain = [(f"<b>{c['status']}</b>", e(c["url"]), f"{c['ms']:.0f} ms") for c in res["chain"]]
+            parts = [self.html_rows(chain, ["Status", "URL", "Time"])]
+            if "cert_valid" in res:
+                good = res["cert_valid"] is True
+                cert = cert_note(res["cert"])[0] if res.get("cert") else ""
+                parts.append(note(("✓ Certificate trusted by browsers. " if good else
+                                   f"⚠ Browsers won't trust this certificate: {e(str(res['cert_valid']))}. ")
+                                  + e(cert), GREEN if good else AMBER))
+            hdr = {k.lower(): v for k, v in res["headers"].items()}
+            sec = [(("✓" if h not in res["missing"] else "✗") + " " + e(h),
+                    f'<span style="color:{MUTED}">{e(why)}</span>') for h, why in SECURITY_HEADERS.items()]
+            parts.append("<p><b>Security headers</b></p>" + self.html_rows(sec))
+            info = [(e(k), e(hdr[k][:120])) for k in ("server", "content-type", "x-powered-by", "cache-control")
+                    if k in hdr]
+            if info:
+                parts.append("<p><b>Other headers</b></p>" + self.html_rows(info))
+            w["out"].setHtml("".join(parts))
+            return
+        if key == "wifi":
+            nets = res["nets"]
+            if not nets:
+                w["out"].setHtml(note("No Wi-Fi information: this computer may have no Wi-Fi, or no tool to read it "
+                                      "(Linux needs NetworkManager's nmcli)."))
+                return
+            parts = []
+            mine = next((n for n in nets if n["active"]), None)
+            if mine:
+                parts.append(f"<p>Connected to <b>{e(mine['ssid'])}</b> on {mine['band']}, channel {mine['channel']}"
+                             f" · signal <b>{mine['signal']}%</b>" + (f" · {e(mine.get('rate', ''))}" if mine.get("rate") else "")
+                             + "</p>")
+            parts.append(note("Channels are set in your router's settings or app. Your own router's extra "
+                              "networks aren't counted as competition."))
+            for band, a in channel_advice(nets).items():
+                counts = ", ".join(f"ch {c}: {n}" for c, n in a["counts"].items()) or "no other routers"
+                tip = ""
+                if a["yours"] and a["best"] and a["counts"].get(a["yours"], 0) > a["counts"].get(a["best"], 0) + 1:
+                    tip = f" → channel <b>{a['best']}</b> is less crowded than yours ({a['yours']})."
+                parts.append(note(f"<b>{band}</b>, other routers per channel: {counts}{tip}", TEXT))
+            bar = lambda sig: f'<span style="color:{GREEN if sig >= 60 else AMBER if sig >= 35 else RED}">'                               + "▮" * max(1, round(sig / 20)) + "</span>" + f" {sig}%"
+            rows = [(("<b>" if n["active"] else "") + e(n["ssid"]) + (" ✓</b>" if n["active"] else ""), n["band"],
+                     str(n["channel"]), bar(n["signal"] or 0), e(n["security"])) for n in nets]
+            parts.append(self.html_rows(rows, ["Network", "Band", "Channel", "Signal", "Security"]))
+            w["out"].setHtml("".join(parts))
+
     # ---- network map -------------------------------------------------------------
 
     def map_tooltip(self, ip):
@@ -5372,21 +6265,27 @@ class MainWindow(QMainWindow):
             self.net_tiles[key] = (value, detail)
         cl.addLayout(grid)
 
+        self.speed_provider = QComboBox()
+        for key, label in SPEED_PROVIDERS:
+            self.speed_provider.addItem(label, key)
+        self.speed_provider.setToolTip("Automatic uses Cloudflare, and the nearest public LibreSpeed server if "
+                                       "Cloudflare is busy or rate-limiting")
         self.speed_btn = QPushButton("Run speed test")
         self.speed_btn.setObjectName("primary")
         self.speed_btn.clicked.connect(self.run_speed_test)
-        self.speed_note = QLabel(f"About 12 seconds through Cloudflare's speed test, using up to "
+        self.speed_note = QLabel(f"About 12 seconds, using up to "
                                  f"{SPEED_DOWN_BYTES // 1_000_000} MB down and {SPEED_UP_BYTES // 1_000_000} MB up. "
                                  "Through a VPN it measures the VPN's speed.")
         self.speed_note.setObjectName("muted")
         self.speed_note.setWordWrap(True)
         speed, sl, sh = make_card("Speed test")
         sh.addWidget(self.speed_note, 1)
+        sh.addWidget(self.speed_provider)
         sh.addWidget(self.speed_btn)
         row = QHBoxLayout()
         row.setSpacing(10)
         self.speed_tiles = {}
-        for key, label in (("down", "Download"), ("up", "Upload")):
+        for key, label in (("down", "Download"), ("up", "Upload"), ("bloat", "Bufferbloat")):
             frame, value, detail = self.make_tile(label)
             row.addWidget(frame)
             self.speed_tiles[key] = (value, detail)
@@ -5410,8 +6309,10 @@ class MainWindow(QMainWindow):
         self.speed_btn.setEnabled(False)
         for value, detail in self.speed_tiles.values():
             value.setText("…")
+            value.setStyleSheet("")
             detail.setText("testing")
-        self.worker.run("speed", speed_test)
+        provider = self.speed_provider.currentData()
+        self.worker.run("speed", lambda: speed_test(provider=provider))
 
     def device_name_for(self, ip):
         """'Trading Pi' for an address NetScan knows, else ''."""
@@ -5420,19 +6321,40 @@ class MainWindow(QMainWindow):
         return rec.get("nickname") or (h or {}).get("hostname") or rec.get("hostname", "")
 
     def worker_done(self, tag, res):
+        if tag == "uptime":
+            if not isinstance(res, Exception):
+                self.uptime_result(res)
+            return
+        if tag.startswith("tool:"):
+            self.tool_done(tag[5:], res)
+            return
         if tag == "speed":
             self.speed_btn.setEnabled(True)
             if isinstance(res, Exception):
                 busy = isinstance(res, urllib.error.HTTPError) and res.code == 429
                 for value, detail in self.speed_tiles.values():
                     value.setText("—")
-                    detail.setText("Cloudflare's speed test is rate-limiting this connection; try again in a few "
-                                   "minutes." if busy else f"failed: {res}")
+                    detail.setText("Cloudflare's speed test is rate-limiting this connection; choose LibreSpeed or "
+                                   "Automatic, or try again later." if busy else f"failed: {res}")
                 return
             for key in ("down", "up"):
                 value, detail = self.speed_tiles[key]
                 value.setText(f"{res[key]:.0f} Mbit/s")
-                detail.setText(f"at {res['when']} · ≈ {res[key] / 8:.1f} MB/s · {res['used_mb']:.0f} MB used in total")
+                detail.setText(f"{res['server']} at {res['when']} · ≈ {res[key] / 8:.1f} MB/s · "
+                               f"{res['used_mb']:.0f} MB used"
+                               + (f"\n{res['note']}" if res.get("note") and key == "down" else ""))
+            value, detail = self.speed_tiles["bloat"]
+            if res.get("grade"):
+                load = res["loaded_ms"]
+                value.setText(f"{res['grade']}  (+{res['added_ms']:.0f} ms)")
+                value.setStyleSheet(f"color: {GREEN if res['grade'] in ('A+', 'A') else AMBER if res['grade'] in ('B', 'C') else RED};")
+                detail.setText(f"latency {res['idle_ms']:.0f} ms idle → "
+                               f"{load['down'] or 0:.0f} ms downloading, {load['up'] or 0:.0f} ms uploading. "
+                               + ("Calls and games stay smooth while the line is busy." if res["grade"] in ("A+", "A")
+                                  else "Lag during downloads/calls; a router with SQM/“smart queue” fixes it."))
+            else:
+                value.setText("—")
+                detail.setText("couldn't ping 1.1.1.1 during the test")
             return
         if tag != "internet":
             return
@@ -5547,6 +6469,13 @@ class MainWindow(QMainWindow):
         if first_run:
             new = []  # the very first check just learns what's normal
         self.online_macs = {h["mac"] for h in hosts if h["mac"]}
+        was = {t for _s, t in self.spoof_warnings}
+        self.run_spoof_check({h["ip"]: h["mac"] for h in hosts}, net)
+        fresh = [t for sv, t in self.spoof_warnings if sv == "high" and t not in was]
+        if fresh:
+            notify("Possible ARP spoofing on your network", fresh[0])
+            self.set_dot(RED)
+            self.status.setText("⚠ " + fresh[0])
 
         changes = []  # (host, opened, closed)
         top = {"tcp": port_set(top_tcp_ports(100)), "udp": set()}
@@ -5687,7 +6616,7 @@ class MainWindow(QMainWindow):
             })
         return {"network": self.last_target, "when": datetime.datetime.now().strftime("%d %b %Y, %H:%M"),
                 "scanner": f"{socket.gethostname()} ({me})" if me else socket.gethostname(),
-                "upnp": self.upnp, "hosts": hosts}
+                "upnp": self.upnp, "hosts": hosts, "spoof": self.spoof_warnings}
 
     def export_report(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save network report", self.default_name("html"),
@@ -5732,6 +6661,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.mon_timer.stop()
+        self.uptime_timer.stop()
         self.save_notes()
         self.save_settings()
         if self.watch_proc is not None and self.watch_proc.state() != QProcess.NotRunning:
@@ -5780,7 +6710,128 @@ def self_test():
     return 0 if ok else 1
 
 
+# ---- command-line mode ---------------------------------------------------------
+# No window and no Qt: for SSH sessions, a Raspberry Pi, cron jobs or scripts.
+
+CLI_HELP = """NetScan command-line mode
+
+  netscan.py                        open the app
+  netscan.py --scan [TARGET]        find hosts (default: this computer's network)
+      --ports                       also scan each host's top 100 TCP ports
+      --privileged                  use raw packets (needs root, or nmap capabilities)
+      --no-names                    skip name lookups (faster)
+  netscan.py --internet             public IP, DNS, latency to router and internet
+  netscan.py --self-test            check nmap and network detection
+  add --json to --scan/--internet for machine-readable output
+
+examples:
+  netscan.py --scan --ports
+  netscan.py --scan 10.0.0.0/24 --json > hosts.json
+"""
+
+
+def cli_scan(target, ports, privileged, names):
+    """Run one scan without the GUI; returns a list of host dicts (like the app's, plus 'ports')."""
+    nmap = find_program("nmap")
+    if not nmap:
+        raise SystemExit("nmap not found.")
+    nets = detect_networks()
+    net = None
+    if target:
+        try:
+            wanted = ipaddress.ip_network(target, strict=False)
+            net = next((n for n in nets if wanted.subnet_of(n["network"])), None)
+        except ValueError:
+            pass
+    else:
+        net = nets[0] if nets else None
+        if not net:
+            raise SystemExit("No network detected; give a target, e.g. --scan 192.168.1.0/24")
+        target = str(net["network"])
+    args = ["-n", "-T4", "-oX", "-"]
+    args += ["--top-ports", "100"] + (LAN_FAST if net else []) if ports else ["-sn"]
+    if privileged and not IS_WIN:
+        args.insert(0, "--privileged")
+    elif IS_WIN and not npcap_installed():
+        args.insert(0, "--unprivileged")
+    if net:
+        args += ["--exclude", net["local_ip"], *iface_args(net)]
+    out = run_text(nmap, *args, *target.split(","))
+    if "<nmaprun" not in out:
+        raise SystemExit("nmap failed: " + (out.strip()[-300:] or "no output"))
+    root = ET.fromstring(out[out.index("<nmaprun"):])
+    hosts = []
+    for elem in root.findall("host"):
+        h = parse_host(elem)
+        if h:
+            h["ports"] = parse_ports(elem) if ports else None
+            hosts.append(h)
+    if net:
+        macs = neighbour_macs(net["iface"])
+        for h in hosts:
+            h["mac"] = h["mac"] or macs.get(h["ip"], "")
+        me = net["local_ip"]
+        if ipaddress.ip_address(me) in ipaddress.ip_network(target.split(",")[0], strict=False):
+            mine = local_open_ports(local_listeners())
+            hosts.append({"ip": me, "hostname": socket.gethostname(), "mac": net["mac"], "vendor": "(this computer)",
+                          "ports": [p for p in mine if not p["local_only"] and not p["temporary"]]})
+    for h in hosts:
+        h["vendor"] = h["vendor"] or mac_vendor(h["mac"])
+    if names:
+        with ThreadPoolExecutor(max_workers=32) as ex:
+            for h, name in zip(hosts, ex.map(lambda h: h["hostname"] or lookup_name(h["ip"]), hosts)):
+                h["hostname"] = name
+    return sorted(hosts, key=lambda h: ip_sort_key(h["ip"]))
+
+
+def cli_table(rows, headers):
+    widths = [max(len(str(r[i])) for r in rows + [headers]) for i in range(len(headers))]
+    line = lambda r: "  ".join(str(c).ljust(w) for c, w in zip(r, widths)).rstrip()
+    return "\n".join([line(headers), line(["-" * w for w in widths])] + [line(r) for r in rows])
+
+
+def cli_main(argv):
+    as_json = "--json" in argv
+    if "--help" in argv or "-h" in argv:
+        print(CLI_HELP)
+        return 0
+    if "--scan" in argv:
+        i = argv.index("--scan")
+        target = argv[i + 1] if i + 1 < len(argv) and not argv[i + 1].startswith("-") else None
+        if target and not re.fullmatch(r"[0-9A-Za-z.\-/:,]+", target):
+            print("Invalid target.", file=sys.stderr)
+            return 2
+        hosts = cli_scan(target, "--ports" in argv, "--privileged" in argv, "--no-names" not in argv)
+        if as_json:
+            print(json.dumps(hosts, indent=2))
+        else:
+            rows = [[h["ip"], h["hostname"] or "-", h["mac"] or "-", h["vendor"] or "-"]
+                    + ([summarize_ports(h["ports"]) or "none open"] if "--ports" in argv else []) for h in hosts]
+            print(cli_table(rows, ["IP", "HOSTNAME", "MAC", "VENDOR"] + (["OPEN PORTS"] if "--ports" in argv else [])))
+            print(f"\n{len(hosts)} host(s).")
+        return 0
+    if "--internet" in argv:
+        nets = detect_networks()
+        res = internet_check(nets[0]["gateway"] if nets else None)
+        if as_json:
+            print(json.dumps(res, indent=2))
+            return 0
+        trace = res.get("trace") or {}
+        fmt = lambda v: "no reply" if not v or v[0] is None else f"{v[0]:.1f} ms, {v[1]:.0f}% loss"
+        for label, value in (("Public IP", f"{trace.get('ip', '?')} ({trace.get('loc', '?')}, Cloudflare {trace.get('colo', '?')})"),
+                             ("DNS servers", ", ".join(res.get("dns") or []) or "?"),
+                             ("DNS lookup", f"{res['dns_ms']:.0f} ms" if res.get("dns_ms") else "?"),
+                             ("Router", fmt(res.get("router"))), ("Cloudflare 1.1.1.1", fmt(res.get("cf"))),
+                             ("Google 8.8.8.8", fmt(res.get("google")))):
+            print(f"{label:20} {value}")
+        return 0
+    return None  # not a CLI request
+
+
 def main():
+    cli = cli_main(sys.argv[1:]) if any(a in sys.argv for a in ("--scan", "--internet", "--help", "-h")) else None
+    if cli is not None:
+        sys.exit(cli)
     if len(sys.argv) >= 2 and sys.argv[1] == "--askpass":
         sys.exit(askpass_main(" ".join(sys.argv[2:])))
     if "--self-test" in sys.argv:
