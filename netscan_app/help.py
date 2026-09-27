@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QDialog, QPushButton, QTextBrowser, QVBoxLayout
 
 from . import theme as T
 from .devices import data_dir
+from .tools_tab import TOOL_GROUPS
 
 TABS = [
     ("Scan", "Ctrl+1", "Find hosts on your network (F5), then scan their ports. Right-click a host for Wake-on-LAN, "
@@ -21,7 +22,7 @@ TABS = [
     ("Tools", "Ctrl+6", "The toolbox below."),
 ]
 
-TOOLS = [
+TOOLS = dict([
     ("DNS lookup", "Any record type, from your DNS or a public resolver."),
     ("Check ports", "Is a port open on a host (yours or on the internet)?"),
     ("IP info", "Who owns an IP address (RDAP registry data)."),
@@ -37,7 +38,7 @@ TOOLS = [
     ("Website watch", "Get told when a website goes down or its certificate is about to expire."),
     ("DNS speed", "Your DNS against Cloudflare, Google and Quad9, cached and uncached."),
     ("History", "Devices online, latency, loss and speed tests over the last 30 days."),
-]
+])
 
 SHORTCUTS = [("F1", "This help"), ("F5", "Find hosts"), ("Ctrl+K", "Jump to anything (tabs, tools, devices, actions)"),
              ("Ctrl+F", "Filter the host list"), ("Ctrl+1 … Ctrl+6", "Switch tabs"),
@@ -59,15 +60,20 @@ class HelpMixin:
     def show_help(self):
         e = html.escape
 
+        def cells(rows):
+            return "".join(f'<tr><td style="padding:3px 14px 3px 0;white-space:nowrap"><b>{e(a)}</b></td>'
+                           f'<td style="padding:3px 0">{e(b)}</td></tr>' for a, b in rows)
+
         def table(rows, head):
-            cells = "".join(f'<tr><td style="padding:3px 14px 3px 0;white-space:nowrap"><b>{e(a)}</b></td>'
-                            f'<td style="padding:3px 0">{e(b)}</td></tr>' for a, b in rows)
-            return f'<h3 style="margin-top:14px">{head}</h3><table cellspacing="0">{cells}</table>'
+            return f'<h3 style="margin-top:14px">{head}</h3><table cellspacing="0">{cells(rows)}</table>'
+
+        tools = "".join(f'<tr><td colspan="2" style="padding:10px 0 2px 0;color:{T.MUTED}">{e(group.upper())}</td></tr>'
+                        + cells((name, TOOLS[name]) for name in names) for group, names in TOOL_GROUPS)
 
         parts = [f'<h2>NetScan</h2><p style="color:{T.MUTED}">A network toolbox built around nmap. Everything '
                  "works on any network; nothing needs a login on other devices.</p>",
                  table([(f"{name}  ({keys})", text) for name, keys, text in TABS], "Tabs"),
-                 table(TOOLS, "Tools"),
+                 f'<h3 style="margin-top:14px">Tools</h3><table cellspacing="0">{tools}</table>',
                  table(SHORTCUTS, "Keyboard"),
                  table(ONLINE, "What contacts the internet"),
                  f'<p style="color:{T.MUTED}">Scans, the Devices list, the Monitor and the LAN speed test stay on '

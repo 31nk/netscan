@@ -32,7 +32,8 @@ echo "Installing PySide6 (Qt) - this can take a minute..."
 
 echo "Creating ${app}..."
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+cp "$here/netscan_app/icons/netscan.icns" "$app/Contents/Resources/NetScan.icns"
 cat > "$app/Contents/MacOS/NetScan" <<'EOF'
 #!/bin/bash
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -49,6 +50,7 @@ cat > "$app/Contents/Info.plist" <<'EOF'
     <key>CFBundleDisplayName</key><string>NetScan</string>
     <key>CFBundleIdentifier</key><string>local.netscan</string>
     <key>CFBundleExecutable</key><string>NetScan</string>
+    <key>CFBundleIconFile</key><string>NetScan</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>1.0</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
@@ -58,6 +60,8 @@ cat > "$app/Contents/Info.plist" <<'EOF'
 </dict>
 </plist>
 EOF
+
+touch "$app"  # so Finder and the Dock pick up the new icon
 
 echo
 echo "Done. Open NetScan from ~/Applications (or Spotlight: \"NetScan\")."

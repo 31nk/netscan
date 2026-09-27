@@ -119,6 +119,7 @@ QListWidget#toolNav {{ background: transparent; border: none; outline: 0; }}
 QListWidget#toolNav::item {{ padding: 8px 10px; border-radius: 8px; color: {MUTED}; }}
 QListWidget#toolNav::item:hover {{ background: {HOVER}; color: {TEXT}; }}
 QListWidget#toolNav::item:selected {{ background: {ACCENT}; color: #ffffff; }}
+QListWidget#toolNav::item:disabled {{ background: transparent; color: {DIM}; padding-bottom: 2px; }}
 QLineEdit, QComboBox, QPlainTextEdit {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px;
                         padding: 6px 10px; color: {TEXT}; selection-background-color: {ACCENT};
                         selection-color: #ffffff; }}

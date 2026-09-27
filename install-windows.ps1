@@ -195,7 +195,7 @@ foreach ($link in $links) {
     $s.TargetPath = Join-Path $dest 'venv\Scripts\pythonw.exe'   # pythonw: no console window
     $s.Arguments = "`"$(Join-Path $dest 'netscan.py')`""
     $s.WorkingDirectory = $dest
-    $s.IconLocation = "$env:SystemRoot\System32\shell32.dll,18"
+    $s.IconLocation = Join-Path $appDir 'icons\netscan.ico'
     $s.Description = 'Scan the local network for devices (nmap)'
     $s.Save()
 }

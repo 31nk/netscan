@@ -87,4 +87,5 @@ a display (`QT_QPA_PLATFORM=offscreen` is set automatically).
 
 `netscan.py` starts the app. The `netscan_app/` package has the engine modules (`scanning`, `discovery`,
 `internet`, `probes`, `tools`, `vulns`, `history_db`, …) and one module per tab (`scan_tab`, `devices_tab`,
-`monitor_tab`, `internet_tab`, `map_tab`, `tools_tab`, `toolkit_tab`), combined in `window.py`.
+`monitor_tab`, `internet_tab`, `map_tab`, `tools_tab`, `toolkit_tab`), combined in `window.py`. `netscan_app/icons/` holds the app icon: `netscan.svg` is the source, and the
+PNG (Linux and the window), ICO (Windows) and ICNS (macOS) are rendered from it.

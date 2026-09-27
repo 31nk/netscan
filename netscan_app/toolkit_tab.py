@@ -76,7 +76,7 @@ class ToolkitMixin:
     """The newer Tools panels. Mixed into MainWindow."""
 
     def build_toolkit_panels(self):
-        """[(title, widget)] appended to the Tools list."""
+        """[(title, widget)] for the Tools list (tools_tab.TOOL_GROUPS decides where each goes)."""
         return [("Connections", self.build_connections_panel()), ("Live traffic", self.build_traffic_panel()),
                 ("Continuous trace", self.build_mtr_panel()), ("LAN speed test", self.build_lan_panel()),
                 ("Domain toolkit", self.build_domain_panel()), ("Website watch", self.build_webwatch_panel()),

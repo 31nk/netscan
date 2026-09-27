@@ -7,10 +7,10 @@ import urllib.parse
 import urllib.request
 
 from PySide6.QtCore import (
-    QSize,
+    QSize, Qt,
 )
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QStackedWidget,
+    QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QStackedWidget,
     QTextBrowser, QVBoxLayout, QWidget,
 )
 
@@ -22,6 +22,15 @@ from .tools import (
     BLOCKED_ANSWERS, DNS_RCODES, DNS_TYPES, SECURITY_HEADERS, channel_advice, dns_tool,
     http_inspect, ip_info, mac_info, port_check, subnet_info, wifi_scan,
 )
+
+# How the Tools list is grouped, in order. Every tool panel must appear here exactly once.
+TOOL_GROUPS = [
+    ("DNS", ["DNS lookup", "DNS speed"]),
+    ("Websites & domains", ["HTTP inspector", "Domain toolkit", "Website watch"]),
+    ("Network & Wi-Fi", ["Wi-Fi", "Continuous trace", "LAN speed test", "History"]),
+    ("Addresses & ports", ["IP info", "Check ports", "Subnet calculator", "MAC lookup"]),
+    ("This computer", ["Connections", "Live traffic"]),
+]
 
 
 class ToolsMixin:
@@ -51,9 +60,8 @@ class ToolsMixin:
         self.tool_nav.setSpacing(1)
         self.tool_stack = QStackedWidget()
         self.tool_widgets = {}
+        panels = {}
         for key, title, desc, placeholder in self.TOOLS:
-            self.tool_nav.addItem(title)
-            self.tool_nav.item(self.tool_nav.count() - 1).setSizeHint(QSize(170, 36))  # room for the padding
             panel = QWidget()
             lay = QVBoxLayout(panel)
             lay.setContentsMargins(0, 0, 0, 0)
@@ -91,15 +99,25 @@ class ToolsMixin:
             lay.addLayout(row)
             lay.addWidget(out, 1)
             self.tool_widgets[key] = {"edit": edit, "extra": extra, "run": run, "out": out}
-            self.tool_stack.addWidget(panel)
-        for title, panel in self.build_toolkit_panels():
-            self.tool_nav.addItem(title)
-            self.tool_nav.item(self.tool_nav.count() - 1).setSizeHint(QSize(170, 36))
-            self.tool_stack.addWidget(panel)
-        self.tool_nav.currentRowChanged.connect(self.tool_stack.setCurrentIndex)
-        self.tool_nav.currentRowChanged.connect(
-            lambda row: self.toolkit_tool_changed(self.tool_nav.item(row).text() if row >= 0 else ""))
-        self.tool_nav.setCurrentRow(0)
+            panels[title] = panel
+        panels.update(self.build_toolkit_panels())
+        for group, names in TOOL_GROUPS:
+            head = QListWidgetItem(group.upper())
+            head.setFlags(Qt.NoItemFlags)  # a heading: not selectable, skipped by the arrow keys
+            font = head.font()
+            font.setPointSizeF(font.pointSizeF() * 0.8)
+            font.setBold(True)
+            head.setFont(font)
+            head.setSizeHint(QSize(170, 28 if self.tool_nav.count() else 20))
+            self.tool_nav.addItem(head)
+            for name in names:
+                item = QListWidgetItem(name)
+                item.setData(Qt.UserRole, self.tool_stack.addWidget(panels.pop(name)))
+                item.setSizeHint(QSize(170, 32))  # room for the padding
+                self.tool_nav.addItem(item)
+        assert not panels, f"tools missing from TOOL_GROUPS: {list(panels)}"
+        self.tool_nav.currentRowChanged.connect(self.tool_selected)
+        self.tool_nav.setCurrentRow(self.tool_rows()[0][0])
         card, cl, _ = make_card("Tools")
         body = QHBoxLayout()
         body.setSpacing(16)
@@ -107,6 +125,18 @@ class ToolsMixin:
         body.addWidget(self.tool_stack, 1)
         cl.addLayout(body, 1)
         return card
+
+    def tool_rows(self):
+        """[(row, name)] of the tools in the list, leaving out the group headings."""
+        nav = self.tool_nav
+        return [(r, nav.item(r).text()) for r in range(nav.count()) if nav.item(r).data(Qt.UserRole) is not None]
+
+    def tool_selected(self, row):
+        item = self.tool_nav.item(row) if row >= 0 else None
+        if item is None or item.data(Qt.UserRole) is None:
+            return
+        self.tool_stack.setCurrentIndex(item.data(Qt.UserRole))
+        self.toolkit_tool_changed(item.text())
 
     def run_tool(self, key):
         w = self.tool_widgets[key]

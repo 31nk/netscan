@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- NetScan: three devices on a ring, with a magnifying glass. Redrawn from the original artwork. -->
+  <defs>
+    <mask id="gaps">
+      <rect width="128" height="128" fill="#fff"/>
+      <g fill="#000"><circle cx="57.5" cy="12.5" r="16.5"/><circle cx="14" cy="94.5" r="16.5"/><circle cx="101" cy="94.5" r="16.5"/></g>
+    </mask>
+  </defs>
+  <g transform="translate(6.5 2)">
+    <circle cx="57.5" cy="65" r="50" fill="#ffffff"/>
+    <circle cx="57.5" cy="65" r="52.5" fill="none" stroke="#3d4751" stroke-width="8" mask="url(#gaps)"/>
+    <g fill="#237ac9">
+      <circle cx="57.5" cy="12.5" r="13"/>
+      <circle cx="14" cy="94.5" r="13"/>
+      <circle cx="101" cy="94.5" r="13"/>
+    </g>
+    <circle cx="50" cy="54" r="14.5" fill="none" stroke="#237ac9" stroke-width="10"/>
+    <line x1="62" y1="66.5" x2="77.5" y2="82.5" stroke="#237ac9" stroke-width="12.5" stroke-linecap="round"/>
+  </g>
+</svg>

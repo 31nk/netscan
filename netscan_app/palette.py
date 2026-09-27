@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QListWidget, QListWidg
 from . import theme as T
 from .columns import DEV_MAC
 from .scanning import ip_sort_key
+from .tools_tab import TOOL_GROUPS
 
 
 # Extra words people search for (the palette matches these as well as the names).
@@ -101,10 +102,10 @@ class PaletteMixin:
     def palette_entries(self):
         tab = lambda i: (lambda: self.tabbar.setCurrentIndex(i))
         entries = [("Tab", self.tabbar.tabText(i), tab(i)) for i in range(self.tabbar.count())]
-        for row in range(self.tool_nav.count()):
-            name = self.tool_nav.item(row).text()
+        group_of = {name: group for group, names in TOOL_GROUPS for name in names}
+        for row, name in self.tool_rows():
             entries.append(("Tool", name, (lambda r=row: (self.tabbar.setCurrentIndex(5), self.tool_nav.setCurrentRow(r))),
-                            TOOL_KEYWORDS.get(name, "")))
+                            TOOL_KEYWORDS.get(name, "") + " " + group_of.get(name, "")))
         entries += [
             ("Action", "Find hosts", lambda: (self.tabbar.setCurrentIndex(0), self.scan_btn.isEnabled() and self.start_scan())),
             ("Action", "Scan ports", lambda: (self.tabbar.setCurrentIndex(0), self.ports_btn.isEnabled() and self.start_port_scan())),

@@ -1,10 +1,12 @@
 """Entry point: command-line mode, the SSH password helper, or the window."""
 
+import os
 import sys
 
 from PySide6.QtCore import (
     QSettings,
 )
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication, QInputDialog, QLineEdit,
 )
@@ -13,11 +15,14 @@ from .cli import cli_main, self_test
 from .theme import apply_theme
 from .window import MainWindow
 
+ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons", "netscan.png")
+
 
 def askpass_main(prompt):
     """--askpass mode: show a password box, print the answer for ssh, exit."""
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("NetScan")
+    app.setWindowIcon(QIcon(ICON))
     apply_theme(app, QSettings("netscan", "netscan").value("theme", "system", type=str))
     text, ok = QInputDialog.getText(None, "NetScan: router login", prompt.strip() or "Password:",
                                     QLineEdit.Password)
@@ -38,6 +43,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("NetScan")
     app.setDesktopFileName("netscan")
+    app.setWindowIcon(QIcon(ICON))
     apply_theme(app, QSettings("netscan", "netscan").value("theme", "system", type=str))
     win = MainWindow()
     win.show()

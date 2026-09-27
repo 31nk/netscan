@@ -61,9 +61,7 @@ else
     python="$venv/bin/python"
 fi
 
-# Plasma's Breeze icons have a nicer Ethernet icon; other desktops fall back to the standard one.
-icon="network-wired"
-[[ "${XDG_CURRENT_DESKTOP:-}" == *KDE* ]] && icon="preferences-system-network-ethernet"
+icon="$here/netscan_app/icons/netscan.png"
 
 echo "Creating $entry"
 mkdir -p "$(dirname "$entry")"

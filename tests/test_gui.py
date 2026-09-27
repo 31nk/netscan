@@ -6,9 +6,12 @@ from unittest import mock
 
 import _support
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog
 
 from netscan_app import window
+from netscan_app.help import TOOLS as HELP_TOOLS
+from netscan_app.tools_tab import TOOL_GROUPS
 from netscan_app.report import build_report
 
 HOST = """<host><status state="up"/><address addr="10.9.9.{n}" addrtype="ipv4"/>
@@ -45,11 +48,24 @@ class Window(unittest.TestCase):
                 win.tabbar.setCurrentIndex(tab)
                 QApplication.processEvents()
             win.tabbar.setCurrentIndex(5)
-            for row in range(win.tool_nav.count()):
+            for row, name in win.tool_rows():
                 win.tool_nav.setCurrentRow(row)
                 QApplication.processEvents()
-            self.assertEqual(win.tool_stack.count(), win.tool_nav.count())
+                self.assertEqual(win.tool_stack.currentIndex(), win.tool_nav.item(row).data(Qt.UserRole))
+            self.assertEqual(win.tool_stack.count(), len(win.tool_rows()))
         win.traffic_timer.stop()
+
+    def test_tool_groups(self):
+        win = self.win
+        grouped = [name for _group, names in TOOL_GROUPS for name in names]
+        self.assertEqual(sorted(grouped), sorted(name for _row, name in win.tool_rows()))
+        self.assertEqual(len(grouped), len(set(grouped)))
+        self.assertEqual(set(grouped), set(HELP_TOOLS))
+        headings = [win.tool_nav.item(r) for r in range(win.tool_nav.count()) if win.tool_nav.item(r).data(Qt.UserRole) is None]
+        self.assertEqual([h.text() for h in headings], [g.upper() for g, _names in TOOL_GROUPS])
+        self.assertTrue(all(h.flags() == Qt.NoItemFlags for h in headings))
+        win.tool_nav.setCurrentRow(0)  # a heading: nothing changes
+        self.assertIsNotNone(win.tool_nav.item(win.tool_rows()[0][0]).data(Qt.UserRole))
 
     def test_help_opens(self):
         self.win.show_help()
@@ -61,8 +77,8 @@ class Window(unittest.TestCase):
 
     def test_palette_lists_every_tool(self):
         labels = {entry[1] for entry in self.win.palette_entries()}
-        for row in range(self.win.tool_nav.count()):
-            self.assertIn(self.win.tool_nav.item(row).text(), labels)
+        for _row, name in self.win.tool_rows():
+            self.assertIn(name, labels)
         self.assertIn("Help", labels)
 
     def test_report_escapes_names(self):
