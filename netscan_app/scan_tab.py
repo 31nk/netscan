@@ -338,6 +338,7 @@ class ScanMixin:
             self.summary += f" {total} open port(s) in the top 100."
         elif n:
             self.summary += " Select hosts and press Scan Ports to check for services."
+        self.summary += self.site_visit_summary()
         self.summary += self.os_summary(self.hosts)
         self.summary += self.this_computer_summary(self.hosts)
         self.summary += self.risk_summary(self.hosts)

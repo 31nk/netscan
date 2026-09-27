@@ -49,9 +49,17 @@ TOOLS = dict([
     ("What the internet sees", "Ports open on your public address (Shodan), known vulnerabilities, spam blocklists."),
     ("Services & web pages", "Every device's web page and announced service (AirPlay, printers, shares…)."),
     ("Outages", "An optional connection watch that logs outages, and a report to send your provider."),
+    ("Client sites", "A separate device list and scans per client network, switched automatically by router."),
+    ("Site audit", "A branded report of a client network, plus an inventory CSV for IT Glue, Hudu and similar."),
+    ("Firewall test", "Which outgoing ports a network allows (web, mail, remote access, VPN, VoIP), and UDP/NAT."),
+    ("VoIP readiness", "Estimated call quality (MOS), SIP reachability, UDP and NAT behaviour."),
+    ("Domain check (bulk)", "Many domains at once: email provider, Microsoft 365, SPF, DMARC, DKIM, expiry dates."),
+    ("Mail server check", "SMTP, STARTTLS, reverse DNS and 14 spam blocklists for a domain's mail servers or an IP."),
+    ("DNS propagation", "A record's answer from 20 public resolvers worldwide and the domain's own name servers."),
 ])
 
 SHORTCUTS = [("F1", "This help"), ("F5", "Find hosts"), ("Ctrl+K", "Jump to anything (tabs, tools, devices, actions)"),
+             ("Ctrl+Shift+C", "Copy what's on screen for a ticket"),
              ("Ctrl+F", "Filter the host list"), ("Ctrl+1 … Ctrl+6", "Switch tabs"),
              ("Delete", "Remove the selected Monitor target")]
 
@@ -71,6 +79,12 @@ ONLINE = [
     ("VPN & privacy", "Cloudflare (your IPv4 and IPv6 address), RDAP registries, and bash.ws (DNS leak test)."),
     ("What the internet sees", "Your public IP address, to Shodan's InternetDB and four spam blocklists."),
     ("Outages (if you turn it on)", "A ping every 30 seconds to 1.1.1.1 and, if that fails, 8.8.8.8."),
+    ("Firewall test / VoIP readiness", "Connections to portquiz.net on each tested port; STUN to Cloudflare and "
+                                       "Google."),
+    ("Domain / mail checks", "RDAP, DNS, the domain's website and mail servers, Microsoft's public sign-in lookup "
+                             "(getuserrealm), and spam blocklists (by DNS)."),
+    ("DNS propagation / Site audit", "20 public DNS resolvers; the audit also uses Cloudflare and RDAP for the "
+                                     "public address."),
 ]
 
 

@@ -17,6 +17,12 @@ any network and on Linux, macOS and Windows. Nothing needs a login on other devi
   grades your connection for video calls, online games, cloud gaming and 4K from latency to cloud regions.
 - **Privacy & exposure**: *VPN & privacy* checks for IPv6 and DNS leaks; *What the internet sees* shows the
   ports open on your public address (Shodan's free InternetDB), known vulnerabilities and spam blocklists.
+- **Client work** (for IT / MSP visits): *Client sites* keep each client's devices and scans separate and switch
+  automatically by the network's router, with "since your last visit" after each scan; *Site audit* writes a
+  branded HTML report of the network plus an inventory CSV for IT Glue, Hudu and similar; *Firewall test* shows
+  which outgoing ports a network allows; *VoIP readiness* estimates call quality (MOS); *Domain check (bulk)*,
+  *Mail server check* (SMTP, STARTTLS, reverse DNS, 14 blocklists) and *DNS propagation* (20 resolvers).
+  **Copy for ticket** (Ctrl+Shift+C) copies any tool's results as plain text.
 - **Outages**: an optional connection watch that logs every outage (internet vs. your own network) and saves
   a report to send your internet provider.
 - **Tools**: every web page and service on your network (Services & web pages), DNS lookup and speed comparison, HTTP inspector, domain toolkit, website watch, Wi-Fi channels,
@@ -72,7 +78,10 @@ IP info, Connections and the domain toolkit (RDAP registries), DNS speed (Cloudf
 Slow internet? and Router check (pings to 1.1.1.1 and 8.8.8.8, Cloudflare for your public IP),
 scheduled speed tests and the Outages connection watch if you turn them on (pings to 1.1.1.1/8.8.8.8),
 Gaming & calls (connections to Amazon's cloud regions), VPN & privacy (Cloudflare, RDAP, and bash.ws for
-the DNS leak test), What the internet sees (your public IP to Shodan's InternetDB and four blocklists),
+the DNS leak test), What the internet sees (your public IP to Shodan's InternetDB and four blocklists), Firewall test and
+VoIP readiness (portquiz.net, STUN at Cloudflare and Google), the domain and mail checks (RDAP, DNS, the sites
+and mail servers themselves, Microsoft's public sign-in lookup, blocklists), DNS propagation (20 public
+resolvers),
 and the HTTP inspector and website watch (the sites you enter). The vulnerability check asks first,
 and sends only software names and versions to the US National Vulnerability Database, never an IP
 address.
@@ -86,7 +95,8 @@ address.
 | Windows | `%APPDATA%\NetScan\` |
 
 It holds `devices.json` (the device list), `history/` (saved scans), `history.db` (30 days of
-measurements), `outages.json`, `wifi_survey.json` and small caches. Delete the folder to start fresh.
+measurements), `outages.json`, `wifi_survey.json`, `sites.json` and small caches. Each client site's own
+device list and saved scans are in `sites/<name>/`; the main folder's are the Home site's. Delete the folder to start fresh.
 
 **Portable mode**: `python3 netscan.py --portable` (or Ctrl+K → Portable mode) copies all of that, plus
 your settings, into a `NetScan-data` folder next to `netscan.py`. From then on NetScan uses that folder,
@@ -106,7 +116,7 @@ a display (`QT_QPA_PLATFORM=offscreen` is set automatically).
 ## Layout
 
 `netscan.py` starts the app. The `netscan_app/` package has the engine modules (`scanning`, `discovery`,
-`internet`, `probes`, `tools`, `checks`, `online`, `outages`, `vulns`, `history_db`, …) and one module per
-tab (`scan_tab`, `devices_tab`, `monitor_tab`, `internet_tab`, `map_tab`, `tools_tab`, `toolkit_tab`,
-`insights_tab`, `online_tab`), combined in `window.py`. `netscan_app/icons/` holds the app icon: `netscan.svg` is the source, and the
+`internet`, `probes`, `tools`, `checks`, `online`, `outages`, `work`, `sites`, `audit`, `vulns`,
+`history_db`, …) and one module per tab (`scan_tab`, `devices_tab`, `monitor_tab`, `internet_tab`, `map_tab`,
+`tools_tab`, `toolkit_tab`, `insights_tab`, `online_tab`, `work_tab`), combined in `window.py`. `netscan_app/icons/` holds the app icon: `netscan.svg` is the source, and the
 PNG (Linux and the window), ICO (Windows) and ICNS (macOS) are rendered from it.

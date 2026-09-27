@@ -20,12 +20,14 @@ from . import theme as T
 from .columns import (
     COLUMNS, COL_CHANGE, COL_HOST, COL_INFO, COL_IP, COL_OS, PORT_COLUMNS, WATCH_INTERVALS,
 )
-from .devices import DeviceStore, app_settings, devices_file, portable_dir
+from .devices import DeviceStore, app_settings, devices_file, portable_dir, set_site_dir
 from .devices_tab import DevicesMixin
 from .export import ExportMixin
 from .help import HelpMixin
 from .insights_tab import InsightsMixin
 from .online_tab import OnlineMixin
+from .sites import Sites
+from .work_tab import WorkMixin
 from .internet_tab import InternetMixin
 from .map_tab import MapMixin
 from .monitor_tab import MonitorMixin
@@ -45,7 +47,7 @@ from .widgets import Discovery, NetworkMap, Resolver, SsdpListener, StatusLabel
 
 
 class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin, ToolkitMixin, InsightsMixin, OnlineMixin,
-                 MapMixin,
+                 WorkMixin, MapMixin,
                  InternetMixin, WatchMixin, PaletteMixin, ExportMixin, HelpMixin, QMainWindow):
     def __init__(self):
         super().__init__()
@@ -78,6 +80,9 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.reported = set()
 
         self.mono = mono_font()
+        self.sites = Sites()
+        set_site_dir(self.sites.folder(self.sites.current))
+        self.current_router = None
         self.devices = DeviceStore(devices_file())
         self.new_devices = set()
         self.online_macs = set()  # seen in the latest scan or watch check
@@ -355,6 +360,8 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.help_btn.clicked.connect(self.show_help)
         head.addWidget(self.help_btn, 0, Qt.AlignVCenter)
         head.addSpacing(6)
+        head.addWidget(self.build_site_button(), 0, Qt.AlignVCenter)
+        head.addSpacing(6)
         head.addWidget(self.theme_btn, 0, Qt.AlignVCenter)
         head.addSpacing(6)
         head.addWidget(self.nmap_pill, 0, Qt.AlignVCenter)
@@ -414,7 +421,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
                            ("Ctrl+4", lambda: self.tabbar.setCurrentIndex(3)),
                            ("Ctrl+5", lambda: self.tabbar.setCurrentIndex(4)),
                            ("Ctrl+6", lambda: self.tabbar.setCurrentIndex(5)),
-                           ("Ctrl+K", self.open_palette)):
+                           ("Ctrl+K", self.open_palette), ("Ctrl+Shift+C", self.copy_for_ticket)):
             act = QAction(self)
             act.setShortcut(QKeySequence(keys))
             act.triggered.connect(slot)
@@ -445,6 +452,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.set_watch(first_delay=5000)
         self.uptime_restart()
         QTimer.singleShot(3000, lambda: self.worker.run("tk:prune", history_db.prune))
+        QTimer.singleShot(1500, self.detect_site)
 
     # ---- settings ----------------------------------------------------------
 
@@ -505,6 +513,8 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
                 f"{n['network']}  ({n['iface']}, you are {n['local_ip']})", n)
         if not self.networks:
             self.status.setText("No LAN subnet detected. Type a target, e.g. 192.168.1.0/24")
+        elif hasattr(self, "sites_table"):  # Re-detect: maybe we moved to another client's network
+            self.detect_site()
 
     def selected_target(self):
         """Return (nmap target list, network dict or None)."""

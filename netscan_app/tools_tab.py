@@ -26,6 +26,8 @@ from .tools import (
 # How the Tools list is grouped, in order. Every tool panel must appear here exactly once.
 TOOL_GROUPS = [
     ("Checkups", ["Slow internet?", "Security checkup", "Router check", "Gaming & calls"]),
+    ("Client work", ["Client sites", "Site audit", "Firewall test", "VoIP readiness", "Domain check (bulk)",
+                     "Mail server check", "DNS propagation"]),
     ("Privacy & exposure", ["VPN & privacy", "What the internet sees"]),
     ("DNS", ["DNS lookup", "DNS speed"]),
     ("Websites & domains", ["HTTP inspector", "Domain toolkit", "Website watch"]),
@@ -74,6 +76,7 @@ class ToolsMixin:
             info = QLabel(desc)
             info.setObjectName("muted")
             info.setWordWrap(True)
+            info.setProperty("noTicket", True)
             row = QHBoxLayout()
             edit = QLineEdit()
             edit.setPlaceholderText(placeholder)
@@ -106,6 +109,7 @@ class ToolsMixin:
         panels.update(self.build_toolkit_panels())
         panels.update(self.build_insight_panels())
         panels.update(self.build_online_panels())
+        panels.update(self.build_work_panels())
         for group, names in TOOL_GROUPS:
             head = QListWidgetItem(group.upper())
             head.setFlags(Qt.NoItemFlags)  # a heading: not selectable, skipped by the arrow keys
@@ -123,7 +127,12 @@ class ToolsMixin:
         assert not panels, f"tools missing from TOOL_GROUPS: {list(panels)}"
         self.tool_nav.currentRowChanged.connect(self.tool_selected)
         self.tool_nav.setCurrentRow(next(r for r, name in self.tool_rows() if name == "DNS lookup"))
-        card, cl, _ = make_card("Tools")
+        card, cl, head = make_card("Tools")
+        head.addStretch(1)
+        copy = QPushButton("Copy for ticket")
+        copy.setToolTip("Copy this tool's results as plain text, ready to paste into a ticket (Ctrl+Shift+C)")
+        copy.clicked.connect(self.copy_for_ticket)
+        head.addWidget(copy)
         body = QHBoxLayout()
         body.setSpacing(16)
         body.addWidget(self.tool_nav)

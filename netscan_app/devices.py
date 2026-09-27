@@ -70,12 +70,27 @@ def make_portable():
     return PORTABLE_DIR, True
 
 
+# The client site in use (sites.py): its folder holds that site's device list and saved scans. None = the
+# main data folder (the "Home" site). History, caches and settings are shared by all sites.
+_SITE = {"dir": None}
+
+
+def set_site_dir(path):
+    if path:
+        os.makedirs(path, exist_ok=True)
+    _SITE["dir"] = path
+
+
+def site_dir():
+    return _SITE["dir"] or data_dir()
+
+
 def devices_file():
-    return os.path.join(data_dir(), "devices.json")
+    return os.path.join(site_dir(), "devices.json")
 
 
 def history_dir():
-    path = os.path.join(data_dir(), "history")
+    path = os.path.join(site_dir(), "history")
     os.makedirs(path, exist_ok=True)
     return path
 

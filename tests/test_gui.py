@@ -32,6 +32,7 @@ class Window(unittest.TestCase):
         for p in cls.patches:
             p.start()
         cls.win = window.MainWindow()
+        cls.win.sites.auto = False  # the test machine's own router mustn't switch sites mid-test
         cls.win.show()
         QApplication.processEvents()
 
@@ -188,6 +189,94 @@ class Window(unittest.TestCase):
             win.save_isp_report()
         with open(target, encoding="utf-8") as f:
             self.assertIn("Internet connection report", f.read())
+
+    def test_sites_keep_devices_apart(self):
+        win = self.win
+        home_count = len(win.devices.devices)
+        win.devices.devices["AA:00:00:00:00:99"] = {"mac": "AA:00:00:00:00:99", "nickname": "Home thing"}
+        sid = win.sites.add("Acme Dental", "AA:BB:00:00:00:01", "10.50.0.0/24")
+        win.switch_site(sid)
+        self.assertEqual(win.site_btn.text(), "Site: Acme Dental")
+        self.assertEqual(win.devices.devices, {})
+        self.assertEqual(win.table.rowCount(), 0)
+        win.devices.devices["BB:00:00:00:00:01"] = {"mac": "BB:00:00:00:00:01", "nickname": "Reception PC"}
+        win.devices.save()
+        win.switch_site("home")
+        self.assertIn("AA:00:00:00:00:99", win.devices.devices)
+        self.assertNotIn("BB:00:00:00:00:01", win.devices.devices)
+        self.assertEqual(len(win.devices.devices), home_count + 1)
+        win.sites.auto = True
+        win.site_detected({"network": "10.50.0.0/24"}, "AA:BB:00:00:00:01")  # arriving at Acme: switch by router
+        self.assertEqual(win.sites.current, sid)
+        self.assertIn("Reception PC", [d.get("nickname") for d in win.devices.devices.values()])
+        win.site_detected({"network": "10.77.0.0/24"}, "CC:00:00:00:00:01")  # an unknown network: its own site
+        self.assertTrue(win.sites.name().startswith("New site 10.77.0.0/24"))
+        win.sites.auto = False
+        win.switch_site("home")
+
+    def test_copy_for_ticket(self):
+        win = self.win
+        win.open_tool("Firewall test")
+        rows = [(c, p, w, "blocked" if p == 25 else "open") for c, p, w in __import__("netscan_app.work",
+                                                                                        fromlist=["x"]).OUTBOUND_PORTS]
+        win.work_done("firewall", {"tcp": rows, "udp_dns": True, "nat": {"udp": True, "kind": "friendly",
+                                                                          "mapped": ("203.0.113.1", 1)}})
+        win.copy_for_ticket()
+        text = QApplication.clipboard().text()
+        self.assertTrue(text.startswith("NetScan · Firewall test · site "))
+        self.assertIn("Port 25 is blocked", text)
+        self.assertIn("Remote access", text)   # the table came along
+        self.assertIn("OUTBOUND", text)
+
+    def test_work_panels(self):
+        win = self.win
+        win.work_done("voip", {"stability": {"median": 20.0, "jitter": 1.0, "loss": 0.0, "spikes": 0},
+                               "sip": {5060: "open", 5061: "open"}, "nat": {"kind": "friendly"}})
+        self.assertTrue(win.voip_head.text().startswith("Call quality 4."))
+        bulk = {"domain": "client.com", "provider": "Google Workspace", "m365": None, "mx": ["aspmx.l.google.com"],
+                "spf": "", "spf_all": "", "dmarc": "none", "dkim": [], "expires": "2030-01-01", "expires_days": 900,
+                "registrar": "X", "web_ok": True, "web_status": 200, "web_error": "", "cert_days": 40, "error": ""}
+        win.work_done("bulk", [bulk])
+        self.assertEqual(win.bulk_table.item(0, 3).text(), "missing")
+        self.assertIn("no SPF", win.bulk_table.item(0, 8).text())
+        win.work_done("mail", {"target": "203.0.113.5", "domain": None, "port25": False, "domain_lists": [],
+                               "servers": [{"host": "203.0.113.5", "ips": ["203.0.113.5"], "reachable": None,
+                                            "starttls": None, "tls": None, "cert": None, "banner": "", "error": "",
+                                            "ptr": {"203.0.113.5": ("mail.client.com", True)},
+                                            "blocklists": {"203.0.113.5": [("SpamCop", "clean", "")]}}]})
+        self.assertIn("on none of 1 blocklists", win.mail_out.toPlainText())
+        win.prop_expected.setText("1.1.1.1")
+        win.work_done("prop", {"name": "a.com", "type": "A", "authoritative": None,
+                               "rows": [("A", "US", ("1.1.1.1",), 5.0, "DNS", ""), ("B", "EU", ("2.2.2.2",), 6.0,
+                                                                                    "HTTPS", ""),
+                                        ("C", "CN", None, None, "", "blocked here")]})
+        self.assertEqual(win.prop_head.text(), "1 of 2 resolvers have 1.1.1.1")
+        self.assertEqual(win.prop_table.item(1, 5).text(), "differs")
+
+    def test_site_audit_and_inventory(self):
+        win = self.win
+        win.current, win.auto_ports, win.scan_message = None, True, "Test scan."
+        win.host_found(ET.fromstring(HOST.format(n=8, name="printer.lan")))
+        win.audit_company.setText("Contoso IT <b>")
+        gathered = {"security": {"wifi": None, "dns_hijack": False, "local_ports": [], "errors": []},
+                    "dns": ["10.9.9.1"], "services": [{"ip": "10.9.9.8", "kind": "Web page", "name": "Printer",
+                                                       "url": "http://10.9.9.8/", "detail": ""}],
+                    "wifi": [], "public": "203.0.113.9 (ISP, US)", "firewall": None}
+        target = os.path.join(_support.TMP, "audit.html")
+        with mock.patch("netscan_app.work_tab.QFileDialog.getSaveFileName", return_value=(target, "")), \
+                mock.patch("netscan_app.work_tab.QDesktopServices.openUrl"):
+            win.work_done("audit", gathered)
+        with open(target, encoding="utf-8") as f:
+            page = f.read()
+        self.assertIn("Network audit: Home", page)
+        self.assertIn("Contoso IT &lt;b&gt;", page)
+        self.assertIn("printer.lan", page)
+        self.assertIn("http://10.9.9.8/", page)
+        csv_path = os.path.join(_support.TMP, "inventory.csv")
+        with mock.patch("netscan_app.work_tab.QFileDialog.getSaveFileName", return_value=(csv_path, "")):
+            win.export_inventory()
+        with open(csv_path, encoding="utf-8") as f:
+            self.assertTrue(f.readline().startswith("Name,Type,IP address"))
 
     def test_open_tool(self):
         self.win.open_tool("Security checkup")

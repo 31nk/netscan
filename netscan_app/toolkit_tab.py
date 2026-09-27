@@ -55,6 +55,7 @@ def _panel(title, desc):
     info = QLabel(desc)
     info.setObjectName("muted")
     info.setWordWrap(True)
+    info.setProperty("noTicket", True)  # Copy for ticket leaves the tool's description out
     lay.addWidget(head)
     lay.addWidget(info)
     return w, lay
@@ -90,6 +91,8 @@ class ToolkitMixin:
             self.show_presence()
         if title == "Outages":
             self.show_outages()
+        if title == "Client sites":
+            self.show_sites()
         if title == "LAN speed test":
             self.lan_hosts_changed()
         if title == "Live traffic":

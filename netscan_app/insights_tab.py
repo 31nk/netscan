@@ -282,6 +282,7 @@ class InsightsMixin:
         out = bytes(self.dhcp_proc.readAllStandardOutput()).decode(errors="replace")
         err = bytes(self.dhcp_proc.readAllStandardError()).decode(errors="replace").strip()
         servers = parse_dhcp_discover(out)
+        self.last_dhcp = [s["server"] for s in servers]  # for the site audit
         if code != 0 and not servers:
             why = ("the password prompt was cancelled" if code in (126, 127) else
                    err.splitlines()[-1] if err else f"nmap exited with code {code}")

@@ -30,6 +30,13 @@ TOOL_KEYWORDS = {
     "What the internet sees": "shodan exposure public ip open ports blacklist blocklist spamhaus hacker",
     "Services & web pages": "web ui admin page bonjour mdns airplay chromecast printer homekit dashboard",
     "Outages": "downtime uptime isp report complaint provider log dropped disconnect",
+    "Client sites": "msp customer client site switch profile tenant location",
+    "Site audit": "msp report documentation assessment onboarding it glue hudu inventory csv branded",
+    "Firewall test": "outbound egress ports blocked portquiz msp",
+    "VoIP readiness": "voip sip phone mos call quality alg rtp",
+    "Domain check (bulk)": "spf dmarc dkim microsoft 365 m365 google workspace expiry msp many domains",
+    "Mail server check": "smtp mx starttls blacklist blocklist rbl ptr reverse dns mxtoolbox",
+    "DNS propagation": "dns propagation whatsmydns change ttl global resolvers",
 }
 
 
@@ -127,6 +134,7 @@ class PaletteMixin:
             ("Action", "Trace route to the internet", lambda: self.trace_route("1.1.1.1", "the internet (1.1.1.1)")),
             ("Action", "Wake-on-LAN by MAC", lambda: (self.tabbar.setCurrentIndex(1), self.mac_edit.setFocus())),
             ("Action", "Help", self.show_help),
+            ("Action", "Copy for ticket", self.copy_for_ticket, "clipboard ticket psa summary text"),
             ("Action", "Portable mode (USB stick)", self.show_portable, "portable usb carry sync data folder"),
             ("Action", "Theme: light", lambda: self.retheme("light")),
             ("Action", "Theme: dark", lambda: self.retheme("dark")),
@@ -140,6 +148,8 @@ class PaletteMixin:
             if d.get("mac") and not any(h["mac"] == mac for h in self.hosts.values()):
                 label = " · ".join(x for x in (d.get("nickname"), d.get("hostname"), d.get("ip"), mac) if x)
                 entries.append(("Known device", label, lambda mac=mac: self.show_known_device(mac)))
+        for sid, site in self.sites.sites.items():
+            entries.append(("Site", site["name"], lambda sid=sid: self.switch_site(sid), "client site switch"))
         return entries
 
     def show_known_device(self, mac):

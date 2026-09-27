@@ -191,6 +191,9 @@ class InternetMixin:
         if tag.startswith("on:"):
             self.online_done(tag[3:], res)
             return
+        if tag.startswith("wk:"):
+            self.work_done(tag[3:], res)
+            return
         if tag == "speed":
             self.speed_btn.setEnabled(True)
             if isinstance(res, Exception):
