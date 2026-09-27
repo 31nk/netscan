@@ -383,7 +383,13 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         right = QHBoxLayout()
         right.setSpacing(6)
         right.addStretch(1)
-        for w in (self.build_site_button(), self.help_btn, self.theme_btn):
+        self.search_btn = QPushButton("Search")
+        self.search_btn.setObjectName("searchButton")
+        self.search_btn.setIcon(QIcon(icon_path("search")))
+        self.search_btn.setToolTip("Search tools, tabs, devices, sites and actions (Ctrl+K)")
+        self.search_btn.setCursor(Qt.PointingHandCursor)
+        self.search_btn.clicked.connect(self.open_palette)
+        for w in (self.search_btn, self.build_site_button(), self.help_btn, self.theme_btn):
             right.addWidget(w, 0, Qt.AlignVCenter)
         # Three columns, the outer two stretching equally, so the tabs sit in the middle of the window.
         head = QGridLayout()
@@ -634,6 +640,18 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         super().resizeEvent(event)
         if hasattr(self, "toast"):
             self.toast.reposition()
+        if hasattr(self, "search_btn"):
+            self.fit_search_button()
+
+    def fit_search_button(self):
+        """Just the magnifier when the window is narrow, so the tabs can stay in the middle; "Search" when
+        there's room."""
+        compact = self.width() < 1260
+        if self.search_btn.property("compact") != compact:
+            self.search_btn.setProperty("compact", compact)
+            self.search_btn.setText("" if compact else "Search")
+            self.search_btn.style().unpolish(self.search_btn)
+            self.search_btn.style().polish(self.search_btn)
 
     def focus_filter(self):
         edit = self.dev_filter if self.tabbar.currentIndex() == TAB_DEVICES else self.filter_edit

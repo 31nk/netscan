@@ -49,7 +49,7 @@ class PaletteDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 12, 12, 12)
         self.edit = QLineEdit()
-        self.edit.setPlaceholderText("Type a tab, tool, action or device… (Enter to go, Esc to close)")
+        self.edit.setPlaceholderText("Search tools, tabs, devices, sites and actions…  (Enter to go, Esc to close)")
         self.list = QListWidget()
         self.list.setObjectName("toolNav")
         self.list.setMinimumHeight(320)
@@ -122,10 +122,13 @@ class PaletteMixin:
                      "Dashboard": "overview home summary status glance"}
         entries = [("Tab", self.tabbar.tabText(i), tab(i), tab_words.get(self.tabbar.tabText(i), ""))
                    for i in range(self.tabbar.count())]
+        from .help import TOOLS as TOOL_HELP  # late: help imports the tools list too
         group_of = {name: group for group, names in TOOL_GROUPS for name in names}
         for row, name in self.tool_rows():
+            # The tool's Help description counts as search words too ("leak" finds VPN & privacy).
+            words = " ".join((TOOL_KEYWORDS.get(name, ""), group_of.get(name, ""), TOOL_HELP.get(name, "")))
             entries.append(("Tool", name, (lambda r=row: (self.tabbar.setCurrentIndex(TAB_TOOLS), self.tool_nav.setCurrentRow(r))),
-                            TOOL_KEYWORDS.get(name, "") + " " + group_of.get(name, "")))
+                            words))
         entries += [
             ("Action", "Find hosts", lambda: (self.tabbar.setCurrentIndex(TAB_SCAN), self.scan_btn.isEnabled() and self.start_scan())),
             ("Action", "Scan ports", lambda: (self.tabbar.setCurrentIndex(TAB_SCAN), self.ports_btn.isEnabled() and self.start_port_scan())),

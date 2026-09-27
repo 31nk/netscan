@@ -471,6 +471,47 @@ class Window(unittest.TestCase):
         win.set_busy(False)
         self.assertNotEqual(win.pulse.anim.state(), win.pulse.anim.State.Running)
 
+    def test_copy_mac_from_scan_menu(self):
+        from PySide6.QtWidgets import QMenu
+        win = self.win
+        win.current, win.auto_ports, win.scan_message = None, True, "Test scan."
+        win.host_found(ET.fromstring(HOST.format(n=9, name="printer.lan")))
+        row = win.row_for_ip("10.9.9.9")
+        win.table.selectRow(row)
+        seen = {}
+
+        def run(menu, *_args):
+            actions = [a for a in menu.actions() if a.text()]
+            texts = [a.text() for a in actions]
+            seen["order"] = texts[texts.index("Copy IP address"):texts.index("Copy IP address") + 2]
+            next(a for a in actions if a.text() == "Copy MAC address").trigger()
+
+        class NoPopup(QMenu):  # Qt's own exec can't be patched; a subclass records instead of showing
+            def exec(self, *args):
+                run(self)
+
+        with mock.patch("netscan_app.scan_tab.QMenu", NoPopup):
+            win.show_context_menu(win.table.visualItemRect(win.table.item(row, 0)).center())
+        self.assertEqual(seen["order"], ["Copy IP address", "Copy MAC address"])
+        self.assertEqual(QApplication.clipboard().text(), "AA:00:00:00:00:09")
+
+    def test_header_search(self):
+        from netscan_app import palette
+        win = self.win
+        opened = {}
+
+        class Recorder(palette.PaletteDialog):
+            def exec(self):
+                opened["dialog"] = self
+
+        with mock.patch.object(palette, "PaletteDialog", Recorder):
+            win.search_btn.click()
+        dlg = opened["dialog"]
+        self.assertTrue(dlg.edit.placeholderText().startswith("Search tools"))
+        for query, first in (("leak", "VPN & privacy"), ("firewall", "Firewall test"), ("mac", "MAC lookup")):
+            dlg.edit.setText(query)
+            self.assertTrue(dlg.list.item(0).text().startswith(first), (query, dlg.list.item(0).text()))
+
     def test_tab_order(self):
         win = self.win
         self.assertEqual([win.tabbar.tabText(i) for i in range(win.tabbar.count())],

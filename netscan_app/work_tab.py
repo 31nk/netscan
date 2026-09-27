@@ -116,7 +116,10 @@ class WorkMixin:
         return self.site_btn
 
     def update_site_button(self):
-        self.site_btn.setText(f"Site: {self.sites.name()}")
+        name = self.sites.name()
+        self.site_btn.setText(f"Site: {name if len(name) <= 16 else name[:15] + '…'}")
+        self.site_btn.setToolTip(f"Client site: {name}. Each site has its own device list and saved scans; NetScan "
+                                 "switches automatically by the network's router.")
         if hasattr(self, "sites_table"):
             self.show_sites()
 

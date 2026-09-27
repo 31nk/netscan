@@ -135,6 +135,10 @@ QPushButton#primary {{ background: {ACCENT}; border: 1px solid {ACCENT}; color: 
                        font-weight: 600; padding: 7px 20px; }}
 QPushButton#primary:hover {{ background: {ACCENT_HI}; border-color: {ACCENT_HI}; }}
 QPushButton#action {{ text-align: left; padding: 9px 12px; }}
+QPushButton#searchButton {{ background: {BG}; color: {MUTED}; text-align: left; padding: 7px 12px 7px 10px;
+                            min-width: 96px; }}
+QPushButton#searchButton:hover {{ color: {TEXT}; border-color: {ACCENT}; }}
+QPushButton#searchButton[compact="true"] {{ min-width: 36px; padding-left: 0; padding-right: 0; text-align: center; }}
 QPushButton#chip {{ border-radius: 11px; padding: 3px 12px; min-height: 16px; color: {MUTED}; background: transparent; }}
 QPushButton#chip:hover {{ color: {TEXT}; border-color: {ACCENT}; background: {HOVER}; }}
 QPushButton#primary:pressed {{ background: {PRIMARY_PRESSED}; }}

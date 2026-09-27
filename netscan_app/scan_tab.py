@@ -139,6 +139,7 @@ class ScanMixin:
             act.setChecked(act.data() == mode)
         self.search_act.setIcon(QIcon(icon_path("search")))
         self.theme_btn.setIcon(QIcon(icon_path("theme")))
+        self.search_btn.setIcon(QIcon(icon_path("search")))
         self.refresh_tool_icons()
         self.dev_search_act.setIcon(QIcon(icon_path("search")))
         for i in range(1, self.detail_type.count()):
@@ -992,6 +993,10 @@ class ScanMixin:
         menu.addAction(self.copy_act)
         menu.addAction("Copy IP address" + ("es" if len(ips) > 1 else ""),
                        lambda: QGuiApplication.clipboard().setText("\n".join(ips)))
+        macs = [self.hosts[ip]["mac"] for ip in ips if self.hosts.get(ip, {}).get("mac")]
+        copy_mac = menu.addAction("Copy MAC address" + ("es" if len(macs) > 1 else ""),
+                                  lambda: QGuiApplication.clipboard().setText("\n".join(macs)))
+        copy_mac.setEnabled(bool(macs))  # e.g. a device seen only over IPv6 or on another subnet
         menu.addSeparator()
         scan = menu.addAction(f"Scan ports on {'this host' if len(ips) == 1 else f'{len(ips)} hosts'}",
                               lambda: self.start_port_scan(ips))
