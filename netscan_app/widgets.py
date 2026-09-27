@@ -14,7 +14,8 @@ from PySide6.QtCore import (
     QEvent, QObject, QPointF, QProcess, QRectF, Qt, Signal,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPen, QTextCursor,
+    QBrush, QColor, QConicalGradient, QFont, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPen,
+    QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QStyle, QStyledItemDelegate,
@@ -1022,8 +1023,13 @@ class HealthRing(QWidget):
         p.setPen(track)
         p.drawArc(box, 225 * 16, -270 * 16)
         if self.score is not None:
-            color = QColor(T.GREEN if self.score >= 85 else T.AMBER if self.score >= 60 else T.RED)
-            arc = QPen(color, width)
+            end = QColor(T.GREEN if self.score >= 85 else T.AMBER if self.score >= 60 else T.RED)
+            start = QColor(T.ACCENT if self.score >= 85 else T.GREEN if self.score >= 60 else T.AMBER)
+            grad = QConicalGradient(box.center(), 225)  # fades along the arc, from where it starts
+            grad.setColorAt(0.0, start)
+            grad.setColorAt(0.75 * max(0.05, self.score / 100), end)
+            grad.setColorAt(1.0, end)
+            arc = QPen(QBrush(grad), width)
             arc.setCapStyle(Qt.RoundCap)
             p.setPen(arc)
             p.drawArc(box, 225 * 16, int(-270 * 16 * max(0.02, self.score / 100)))

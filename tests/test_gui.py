@@ -369,6 +369,75 @@ class Window(unittest.TestCase):
         QApplication.processEvents()
         self.assertTrue(win.dash_when.text().startswith("updated"))
 
+    def test_fading_colours(self):
+        from netscan_app.theme import mix, set_tone
+        self.assertEqual(mix("#ffffff", "#000000", 0.5), "#808080")
+        self.assertEqual(mix("#ff0000", "#0000ff", 0), "#0000ff")
+        win = self.win
+        win.last_security = {"score": 40, "grade": "F", "complete": True, "findings": [], "when": 0}
+        win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+        win.refresh_dashboard()
+        self.assertEqual(win.dash_tiles["security"][0].parentWidget().property("tone"), "bad")
+        set_tone(win.dash_hero, None)
+        self.assertEqual(win.dash_hero.property("tone"), "")
+        win.tabbar.setCurrentIndex(TAB_SCAN)  # the page fades in, then the effect is removed
+        QApplication.processEvents()
+        page = win.pages.currentWidget()
+        self.assertIsNotNone(page.graphicsEffect())
+        win._fade.setCurrentTime(win._fade.duration())
+        QApplication.processEvents()
+        self.assertIsNone(page.graphicsEffect())
+
+    def test_dashboard_takes_you_there(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtTest import QTest
+        win = self.win
+        expect = {"internet": ("Internet", None), "speed": ("Internet", None), "devices": ("Devices", None),
+                  "switch": ("Traffic", None), "security": ("Tools", "Security checkup"), "outages": ("Tools", "Outages")}
+        from PySide6.QtWidgets import QLabel
+        for key, (tab, tool) in expect.items():
+            frame = win.dash_tiles[key][0].parentWidget()
+            for target in [frame] + frame.findChildren(QLabel):  # anywhere on the tile, big number included
+                win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+                QTest.mouseClick(target, Qt.LeftButton)
+                self.assertEqual(win.tabbar.tabText(win.tabbar.currentIndex()), tab, (key, target.objectName()))
+                if tool:
+                    self.assertEqual(win.tool_nav.currentItem().text(), tool, key)
+        # the charts open History, and still show their hover readout
+        for chart in (win.dash_latency, win.dash_speed):
+            win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+            QTest.mouseMove(chart, chart.rect().center())
+            self.assertIsNotNone(chart.hover_x)
+            QTest.mouseClick(chart, Qt.LeftButton)
+            self.assertEqual(win.tool_nav.currentItem().text(), "History")
+        # the health card opens the most important item
+        win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+        win.dash_first_target = "tool:Outages"
+        QTest.mouseClick(win.dash_headline, Qt.LeftButton)
+        self.assertEqual(win.tool_nav.currentItem().text(), "Outages")
+        # a refresh with nothing new doesn't redraw the list (a redraw mid-click would lose the click)
+        win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+        with mock.patch.object(win.dash_attention, "setHtml") as redraw:
+            win.refresh_dashboard()
+        redraw.assert_not_called()
+        # the grey detail line under a linked item is a link too
+        html = win.dash_attention.toHtml()
+        self.assertGreaterEqual(html.count('href="tab:') + html.count('href="tool:'), 2)
+        win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+        win.dash_attention.anchorClicked.emit(QUrl("tool:Website watch"))
+        self.assertEqual(win.tool_nav.currentItem().text(), "Website watch")
+        win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+        win.dash_attention.anchorClicked.emit(QUrl("tab:Devices"))
+        self.assertEqual(win.tabbar.tabText(win.tabbar.currentIndex()), "Devices")
+        # every "Needs attention" item that has somewhere to go links there
+        win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+        self.assertIn('href="tab:', win.dash_attention.toHtml().replace("'", '"'))
+        # quick actions that only navigate
+        for label, tab, tool in (("Site audit", "Tools", "Site audit"),):
+            win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+            next(b for b in win.dash_actions if b.text() == label).click()
+            self.assertEqual((win.tabbar.tabText(win.tabbar.currentIndex()), win.tool_nav.currentItem().text()), (tab, tool))
+
     def test_tab_order(self):
         win = self.win
         self.assertEqual([win.tabbar.tabText(i) for i in range(win.tabbar.count())],

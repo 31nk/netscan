@@ -5,13 +5,13 @@ import os
 import re
 
 from PySide6.QtCore import (
-    QSize, QTimer, Qt,
+    QEasingCurve, QPropertyAnimation, QSize, QTimer, Qt,
 )
 from PySide6.QtGui import (
     QAction, QActionGroup, QGuiApplication, QIcon, QKeySequence,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
+    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
     QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QSizePolicy, QSplitter,
     QStackedWidget, QTabBar, QTableWidget, QVBoxLayout, QWidget,
 )
@@ -591,6 +591,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
 
     def switch_page(self, index):
         self.pages.setCurrentIndex(index)
+        self.fade_in(self.pages.currentWidget())
         for w in (self.compare_btn, self.export_btn):
             w.setVisible(index == TAB_SCAN)
         if index == TAB_DEVICES:
@@ -602,6 +603,25 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         if index == TAB_TRAFFIC:
             self.refresh_traffic()
         self.dashboard_shown(index == TAB_DASHBOARD)
+
+    def fade_in(self, page, ms=180):
+        """Fade a page in when its tab opens. The effect is removed afterwards, so it costs nothing while you
+        work (an opacity effect repaints its whole page off-screen)."""
+        if getattr(self, "_fade", None):
+            self._fade.stop()
+            self._fade_page.setGraphicsEffect(None)  # never leave a page half-faded
+        self._fade_page = page
+        effect = QGraphicsOpacityEffect(page)
+        effect.setOpacity(0.0)
+        page.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(ms)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.finished.connect(lambda: page.setGraphicsEffect(None))
+        self._fade = anim
+        anim.start()
 
     def focus_filter(self):
         edit = self.dev_filter if self.tabbar.currentIndex() == TAB_DEVICES else self.filter_edit

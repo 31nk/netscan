@@ -32,11 +32,27 @@ def level_color(level):
 
 
 def findings_html(findings):
+    """Findings as rich text. A finding may carry a fourth item, a link target such as "tab:Devices" or
+    "tool:Outages"; its title then becomes a link (the page handles the click)."""
     e = html.escape
-    return "".join(f'<p style="margin:10px 0 2px 0"><span style="color:{level_color(lvl)}">{MARKS[lvl]}</span>'
-                   f"&nbsp; <b>{e(title)}</b></p>"
-                   + (f'<p style="margin:0 0 0 18px;color:{T.MUTED}">{e(detail)}</p>' if detail else "")
-                   for lvl, title, detail in findings)
+
+    def title(f):
+        text = f"<b>{e(f[1])}</b>"
+        if len(f) > 3 and f[3]:
+            return (f'<a href="{e(f[3])}" style="color:{T.TEXT}; text-decoration:none">{text}'
+                    f' <span style="color:{T.ACCENT_HI}">›</span></a>')
+        return text
+
+    def detail(f):
+        text = e(f[2])
+        if len(f) > 3 and f[3]:
+            return f'<a href="{e(f[3])}" style="color:{T.MUTED}; text-decoration:none">{text}</a>'
+        return text
+
+    return "".join(f'<p style="margin:10px 0 2px 0"><span style="color:{level_color(f[0])}">{MARKS[f[0]]}</span>'
+                   f"&nbsp; {title(f)}</p>"
+                   + (f'<p style="margin:0 0 0 18px;color:{T.MUTED}">{detail(f)}</p>' if f[2] else "")
+                   for f in findings)
 
 
 def survey_file():

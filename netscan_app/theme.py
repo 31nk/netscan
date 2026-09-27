@@ -106,7 +106,9 @@ def icon_svgs():
 
 
 STYLESHEET = """
-QMainWindow, QWidget#central {{ background: {BG}; }}
+QMainWindow {{ background: {BG}; }}
+QWidget#central {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {glow}, stop:0.38 {BG},
+                                               stop:0.72 {BG}, stop:1 {glow2}); }}
 QToolTip {{ background: {RAISED}; color: {TEXT}; border: 1px solid {BORDER}; padding: 6px; }}
 
 QLabel#title {{ font-size: 17pt; font-weight: 700; }}
@@ -117,9 +119,26 @@ QLabel#heroTitle {{ font-size: 18pt; font-weight: 700; }}
 QLabel#pill {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 11px;
                padding: 3px 11px; color: {MUTED}; }}
 
-QFrame#card {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px; }}
+QFrame#card {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {card_top}, stop:1 {SURFACE});
+                border: 1px solid {BORDER}; border-radius: 12px; }}
+QFrame#card[tone="good"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {good_tint}, stop:0.65 {SURFACE});
+                            border-color: {good_line}; }}
+QFrame#card[tone="warn"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {warn_tint}, stop:0.65 {SURFACE});
+                            border-color: {warn_line}; }}
+QFrame#card[tone="bad"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {bad_tint}, stop:0.65 {SURFACE});
+                           border-color: {bad_line}; }}
 QFrame#statusbar {{ background: {SURFACE}; border-top: 1px solid {BORDER}; }}
-QFrame#tile {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 10px; }}
+QFrame#tile {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {tile_top}, stop:1 {BG});
+                border: 1px solid {BORDER}; border-radius: 10px; }}
+QFrame#tile[tone="good"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {good_tint}, stop:0.7 {BG});
+                            border-color: {good_line}; }}
+QFrame#tile[tone="warn"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {warn_tint}, stop:0.7 {BG});
+                            border-color: {warn_line}; }}
+QFrame#tile[tone="bad"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {bad_tint}, stop:0.7 {BG});
+                           border-color: {bad_line}; }}
+QFrame#tile[link="true"]:hover, QFrame#card[link="true"]:hover {{ border-color: {ACCENT}; }}
+QFrame#tile[tone="accent"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {accent_tint}, stop:0.7 {BG});
+                              border-color: {accent_line}; }}
 QLabel#tileValue {{ font-size: 16pt; font-weight: 700; }}
 QLabel#tileLabel {{ color: {MUTED}; font-size: 8pt; font-weight: 700; }}
 QScrollArea#plain, QScrollArea#plain > QWidget > QWidget {{ background: transparent; border: none; }}
@@ -150,7 +169,8 @@ QTextBrowser {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px
 QListWidget#toolNav {{ background: transparent; border: none; outline: 0; }}
 QListWidget#toolNav::item {{ padding: 8px 10px; border-radius: 8px; color: {MUTED}; }}
 QListWidget#toolNav::item:hover {{ background: {HOVER}; color: {TEXT}; }}
-QListWidget#toolNav::item:selected {{ background: {ACCENT}; color: #ffffff; }}
+QListWidget#toolNav::item:selected {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT},
+                                                                   stop:1 {accent_top}); color: #ffffff; }}
 QListWidget#toolNav::item:disabled {{ background: transparent; color: {DIM}; padding-bottom: 2px; }}
 QLineEdit, QComboBox, QPlainTextEdit, QSpinBox {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px;
                         padding: 6px 10px; color: {TEXT}; selection-background-color: {ACCENT};
@@ -276,9 +296,35 @@ def apply_theme(app, mode="system"):
     for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
         pal.setColor(QPalette.Disabled, role, QColor(DIM))
     app.setPalette(pal)
+    dark = THEME == "dark"
+    tint = 0.16 if dark else 0.10
     app.setStyleSheet(STYLESHEET.format(
         **THEMES[THEME], check=icon_path("check"), chevron=icon_path("chevron"),
-        accent_top=QColor(THEMES[THEME]["ACCENT"]).lighter(118).name()))
+        accent_top=QColor(ACCENT).lighter(118).name(),
+        # Colour that fades: a glow of the accent in the top corner and violet in the bottom one, cards a touch
+        # lighter at the top, and status tints that fade from a corner of a tile or card into its background.
+        glow=mix(ACCENT, BG, 0.13 if dark else 0.09), glow2=mix("#8b5cf6", BG, 0.09 if dark else 0.06),
+        card_top=mix("#ffffff", SURFACE, 0.035) if dark else SURFACE,
+        tile_top=mix("#ffffff", BG, 0.03) if dark else mix("#ffffff", BG, 0.6),
+        good_tint=mix(GREEN, BG, tint), warn_tint=mix(AMBER, BG, tint), bad_tint=mix(RED, BG, tint),
+        accent_tint=mix(ACCENT, BG, tint),
+        good_line=mix(GREEN, BORDER, 0.35), warn_line=mix(AMBER, BORDER, 0.35), bad_line=mix(RED, BORDER, 0.35),
+        accent_line=mix(ACCENT, BORDER, 0.35)))
+
+
+def mix(color, into, amount):
+    """`amount` of `color` blended into `into` (0 = all `into`, 1 = all `color`), as #rrggbb."""
+    a, b = QColor(color), QColor(into)
+    return QColor(round(a.red() * amount + b.red() * (1 - amount)), round(a.green() * amount + b.green() * (1 - amount)),
+                  round(a.blue() * amount + b.blue() * (1 - amount))).name()
+
+
+def set_tone(widget, tone):
+    """Tint a tile or card by status ("good", "warn", "bad", "accent" or "" for none); the stylesheet fades it."""
+    if widget.property("tone") != (tone or ""):
+        widget.setProperty("tone", tone or "")
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
 
 
 def mono_font():
