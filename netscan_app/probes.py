@@ -1,6 +1,7 @@
 """Engines for the newer Tools panels: this computer's connections and traffic, hop discovery for the
 continuous trace, the domain toolkit and website checks. No GUI code; all read-only."""
 
+import base64
 import datetime
 import http.client
 import ipaddress
@@ -9,6 +10,7 @@ import os
 import re
 import socket
 import ssl
+import struct
 import threading
 import time
 import urllib.error
@@ -382,3 +384,133 @@ def save_watch(sites):
             json.dump(sites, f, indent=1)
     except OSError:
         pass
+
+
+# ---- DNS speed comparison ---------------------------------------------------------------
+
+# RFC 8484 endpoints (binary DNS over HTTPS on port 443): every provider supports this form.
+PUBLIC_DOH = [("Cloudflare 1.1.1.1", "https://1.1.1.1/dns-query"), ("Google 8.8.8.8", "https://dns.google/dns-query")]
+# Quad9's DoH wants HTTP/2 (Python's built-in client speaks 1.1), so it's asked over DNS-over-TLS.
+PUBLIC_DOT = [("Quad9 9.9.9.9", "9.9.9.9", "dns.quad9.net")]
+
+
+def _dns_wire(name, ident=0):
+    question = b"".join(bytes([len(p)]) + p.encode("idna") for p in name.split(".")) + b"\0"
+    return struct.pack(">6H", ident, 0x0100, 1, 0, 0, 0) + question + b"\0\1\0\1"
+
+
+def _dot_timer(ip, hostname):
+    """name -> ms over one kept-open DNS-over-TLS connection (RFC 7858, port 853)."""
+    raw = socket.create_connection((ip, 853), timeout=6)
+    tls = ssl.create_default_context().wrap_socket(raw, server_hostname=hostname)
+
+    def recv_exact(n):
+        buf = b""
+        while len(buf) < n:
+            chunk = tls.recv(n - len(buf))
+            if not chunk:
+                raise OSError("connection closed")
+            buf += chunk
+        return buf
+
+    def ask(name):
+        wire = _dns_wire(name, int.from_bytes(os.urandom(2), "big"))
+        t = time.perf_counter()
+        tls.sendall(struct.pack(">H", len(wire)) + wire)
+        recv_exact(struct.unpack(">H", recv_exact(2))[0])
+        return (time.perf_counter() - t) * 1000
+
+    ask("example.com")  # warm-up
+    return ask
+POPULAR_NAMES = ["google.com", "youtube.com", "wikipedia.org", "amazon.com", "github.com", "reddit.com",
+                 "netflix.com", "microsoft.com"]
+
+
+def _doh_timer(base):
+    """A function name -> ms for one DNS-over-HTTPS server, on one kept-open connection (so only the
+    lookup is timed, not the TLS handshake)."""
+    u = urllib.parse.urlparse(base)
+    conn = http.client.HTTPSConnection(u.hostname, u.port or 443, timeout=6, context=ssl.create_default_context())
+
+    def ask(name):
+        query = base64.urlsafe_b64encode(_dns_wire(name)).rstrip(b"=").decode()
+        t = time.perf_counter()
+        conn.request("GET", f"{u.path}?dns={query}", headers={"Accept": "application/dns-message", **AGENT})
+        r = conn.getresponse()
+        r.read()
+        if r.status != 200:
+            raise OSError(f"HTTP {r.status}")
+        return (time.perf_counter() - t) * 1000
+
+    ask("example.com")  # opens the connection; not counted
+    return ask
+
+
+def _median_ms(values):
+    values = sorted(v for v in values if v is not None)
+    return values[len(values) // 2] if values else None
+
+
+def dns_benchmark():
+    """Time your DNS server against public ones: popular names (usually cached) and made-up names
+    under real domains (never cached, so the server has to go and ask). Returns rows + verdict."""
+    from .internet import dns_servers  # late: internet imports tools, which this module also uses
+    from .tools import dns_query
+    mine = (dns_servers() or [None])[0]
+    tag = os.urandom(3).hex()
+    uncached = [f"netscan-{tag}-{i}.{d}" for i, d in enumerate(POPULAR_NAMES[:6])]
+    resolvers = []
+    if mine:
+        resolvers.append((f"Your DNS ({mine})", lambda: (lambda n: dns_query(mine, n, "A")[2]), "plain DNS"))
+    resolvers += [(name, (lambda b=base: _doh_timer(b)), "DNS-over-HTTPS") for name, base in PUBLIC_DOH]
+    resolvers += [(name, (lambda i=ip, h=host: _dot_timer(i, h)), "DNS-over-TLS") for name, ip, host in PUBLIC_DOT]
+
+    def run(entry):
+        name, make, how = entry
+        try:
+            ask = make()
+        except (OSError, http.client.HTTPException) as e:
+            return {"name": name, "how": how, "error": str(e)}
+        cached, fresh, failed = [], [], 0
+        for n in POPULAR_NAMES:
+            for i in range(2):  # the second ask is the cached one
+                try:
+                    ms = ask(n)
+                    if i:
+                        cached.append(ms)
+                except (OSError, http.client.HTTPException):
+                    failed += 1
+        for n in uncached:
+            try:
+                fresh.append(ask(n))
+            except (OSError, http.client.HTTPException):
+                failed += 1
+        return {"name": name, "how": how, "cached": _median_ms(cached), "uncached": _median_ms(fresh),
+                "failed": failed}
+
+    with ThreadPoolExecutor(max_workers=len(resolvers)) as ex:
+        rows = list(ex.map(run, resolvers))
+    return {"rows": rows, "verdict": dns_verdict(rows)}
+
+
+def dns_verdict(rows):
+    ok = [r for r in rows if r.get("uncached") is not None]
+    mine = next((r for r in rows if r["name"].startswith("Your DNS")), None)
+    if not mine or mine.get("uncached") is None or len(ok) < 2:
+        return "Not enough answers to compare."
+    best = min((r for r in ok if r is not mine), key=lambda r: r["uncached"])
+    text = []
+    if mine["cached"] is not None:
+        fast = "under 1 ms" if mine["cached"] < 1 else f"{mine['cached']:.0f} ms"
+        text.append(f"For sites you visit often your DNS answers in {fast}"
+                    + (": as fast as it gets." if mine["cached"] < 10 else "."))
+    if mine["uncached"] > 2 * best["uncached"] and mine["uncached"] - best["uncached"] > 40:
+        text.append(f"For names it hasn't seen it takes {mine['uncached']:.0f} ms vs {best['uncached']:.0f} ms at "
+                    f"{best['name']}, so first visits to new sites start slower. If your DNS is a recursive "
+                    "resolver such as Unbound (common with Pi-hole), that's the price of its privacy: it asks the "
+                    "internet's root servers itself. Forwarding it to a fast provider instead trades some "
+                    "privacy for speed.")
+    else:
+        text.append(f"New names take {mine['uncached']:.0f} ms, close to the best public option "
+                    f"({best['name']}, {best['uncached']:.0f} ms). No need to change anything.")
+    return " ".join(text)

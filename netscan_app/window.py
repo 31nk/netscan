@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QTabBar, QTableWidget, QVBoxLayout, QWidget,
 )
 
+from . import history_db
 from . import theme as T
 from .columns import (
     COLUMNS, COL_CHANGE, COL_HOST, COL_INFO, COL_IP, COL_OS, PORT_COLUMNS, WATCH_INTERVALS,
@@ -22,6 +23,7 @@ from .columns import (
 from .devices import DeviceStore, devices_file
 from .devices_tab import DevicesMixin
 from .export import ExportMixin
+from .help import HelpMixin
 from .internet_tab import InternetMixin
 from .map_tab import MapMixin
 from .monitor_tab import MonitorMixin
@@ -41,7 +43,7 @@ from .widgets import Discovery, NetworkMap, Resolver, SsdpListener, StatusLabel
 
 
 class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin, ToolkitMixin, MapMixin,
-                 InternetMixin, WatchMixin, PaletteMixin, ExportMixin, QMainWindow):
+                 InternetMixin, WatchMixin, PaletteMixin, ExportMixin, HelpMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("NetScan")
@@ -344,6 +346,12 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         head.addStretch(1)
         head.addWidget(segment, 0, Qt.AlignVCenter)
         head.addStretch(1)
+        self.help_btn = QPushButton("?")
+        self.help_btn.setObjectName("helpButton")
+        self.help_btn.setToolTip("Help: tabs, tools, shortcuts and what goes online (F1)")
+        self.help_btn.clicked.connect(self.show_help)
+        head.addWidget(self.help_btn, 0, Qt.AlignVCenter)
+        head.addSpacing(6)
         head.addWidget(self.theme_btn, 0, Qt.AlignVCenter)
         head.addSpacing(6)
         head.addWidget(self.nmap_pill, 0, Qt.AlignVCenter)
@@ -396,7 +404,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.uptime_timer.timeout.connect(self.uptime_tick)
         self.uptime_state = {}  # mac -> {"up", "misses", "down_since"}
 
-        for keys, slot in (("F5", self.shortcut_scan), (QKeySequence.Find, self.focus_filter),
+        for keys, slot in (("F5", self.shortcut_scan), ("F1", self.show_help), (QKeySequence.Find, self.focus_filter),
                            ("Ctrl+1", lambda: self.tabbar.setCurrentIndex(0)),
                            ("Ctrl+2", lambda: self.tabbar.setCurrentIndex(1)),
                            ("Ctrl+3", lambda: self.tabbar.setCurrentIndex(2)),
@@ -433,6 +441,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.watch_combo.currentIndexChanged.connect(self.set_watch)
         self.set_watch(first_delay=5000)
         self.uptime_restart()
+        QTimer.singleShot(3000, lambda: self.worker.run("tk:prune", history_db.prune))
 
     # ---- settings ----------------------------------------------------------
 

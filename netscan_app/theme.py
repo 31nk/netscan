@@ -112,6 +112,7 @@ QPushButton::menu-indicator {{ image: url("{chevron}"); width: 12px; height: 12p
                                subcontrol-origin: padding; subcontrol-position: right center;
                                right: 8px; }}
 QPushButton#menuButton {{ padding-right: 28px; }}
+QPushButton#helpButton {{ padding-left: 0; padding-right: 0; min-width: 36px; font-weight: 600; }}
 
 QTextBrowser {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px; padding: 8px; color: {TEXT}; }}
 QListWidget#toolNav {{ background: transparent; border: none; outline: 0; }}

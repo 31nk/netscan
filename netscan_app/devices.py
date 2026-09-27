@@ -107,6 +107,8 @@ RISKY_PORTS = {
 def port_risk(p):
     if p.get("local_only") or p.get("temporary"):
         return ""  # nothing on the network can reach it
+    if "program" in p and (p["port"], p["proto"]) == (1900, "udp"):
+        return ""  # on a computer (its own socket list) this is an SSDP listener, not a router's UPnP service
     return RISKY_PORTS.get((p["port"], p["proto"]), "")
 
 

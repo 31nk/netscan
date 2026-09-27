@@ -17,6 +17,8 @@ TOOL_KEYWORDS = {
     "Live traffic": "bandwidth throughput usage graph", "Continuous trace": "mtr traceroute ping path hops loss",
     "LAN speed test": "iperf throughput local", "Domain toolkit": "whois spf dmarc dkim mx email registrar",
     "Website watch": "uptime monitor ssl certificate expiry down",
+    "DNS speed": "dns benchmark resolver faster namebench unbound pihole",
+    "History": "history log timeline outages charts past week",
 }
 
 
@@ -113,6 +115,7 @@ class PaletteMixin:
             ("Action", "Save scan", self.save_json),
             ("Action", "Trace route to the internet", lambda: self.trace_route("1.1.1.1", "the internet (1.1.1.1)")),
             ("Action", "Wake-on-LAN by MAC", lambda: (self.tabbar.setCurrentIndex(1), self.mac_edit.setFocus())),
+            ("Action", "Help", self.show_help),
             ("Action", "Theme: light", lambda: self.retheme("light")),
             ("Action", "Theme: dark", lambda: self.retheme("dark")),
             ("Action", "Theme: system", lambda: self.retheme("system")),

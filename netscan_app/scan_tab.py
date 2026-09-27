@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QApplication, QInputDialog, QMenu, QMessageBox, QTableWidgetItem,
 )
 
+from . import history_db
 from . import theme as T
 from .columns import (
     COLUMNS, COL_CHANGE, COL_HOST, COL_INFO, COL_IP, COL_MAC, COL_NAME, COL_OS, COL_PORTS,
@@ -36,6 +37,7 @@ from .system import (
     neighbour_macs, now_iso, terminal_argv, this_os_name,
 )
 from .theme import apply_theme, icon_path
+from .vulns import versioned_cpes
 from .widgets import IPItem, TraceDialog
 
 
@@ -301,6 +303,7 @@ class ScanMixin:
             if self.current:
                 self.online_macs = {h["mac"] for h in self.hosts.values() if h["mac"]}
                 self.run_spoof_check({ip: h["mac"] for ip, h in self.hosts.items()})
+                history_db.record("online", str(self.current["network"]), len(self.hosts))
             for ip, h in self.hosts.items():
                 rec = self.devices.get(h)
                 for key in ("hostname",) + DISCOVERY_FIELDS:  # remembered names, models, services
@@ -1021,6 +1024,8 @@ class ScanMixin:
                 menu.addAction(f"Open http://{ip}",
                                lambda: QDesktopServices.openUrl(QUrl(f"http://{ip}")))
             menu.addAction(f"Trace route to {ip}", lambda: self.trace_route(ip, self.monitor_label(ip)))
+            menu.addAction("Check known vulnerabilities…" if versioned_cpes(self.ports.get(ip)) else
+                           "Check known vulnerabilities… (needs Detect versions)", lambda: self.check_vulns(ip))
             ping = terminal_argv(["ping", ip])
             if ping:
                 if 22 in open_ports or ip not in self.ports:

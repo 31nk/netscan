@@ -8,19 +8,22 @@ from collections import deque
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QPushButton,
     QTableWidget, QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget,
 )
 
+from . import history_db
 from . import theme as T
 from .discovery import ufw_active
 from .lanspeed import LAN_PORT, LanSpeedServer, lan_speed_test
 from .probes import (
-    check_site, describe_connections, domain_report, email_verdicts, find_hops, interface_counters,
+    check_site, describe_connections, dns_benchmark, domain_report, email_verdicts, find_hops, interface_counters,
     load_watch, reverse_name, save_watch,
 )
 from .scanning import ip_sort_key
-from .widgets import Pinger, TrafficChart, notify
+from .vulns import host_vulnerabilities, versioned_cpes
+from .widgets import Pinger, TimeSeriesChart, TrafficChart, notify
 
 WEB_WATCH_MINUTES = 5
 
@@ -76,10 +79,13 @@ class ToolkitMixin:
         """[(title, widget)] appended to the Tools list."""
         return [("Connections", self.build_connections_panel()), ("Live traffic", self.build_traffic_panel()),
                 ("Continuous trace", self.build_mtr_panel()), ("LAN speed test", self.build_lan_panel()),
-                ("Domain toolkit", self.build_domain_panel()), ("Website watch", self.build_webwatch_panel())]
+                ("Domain toolkit", self.build_domain_panel()), ("Website watch", self.build_webwatch_panel()),
+                ("DNS speed", self.build_dnsbench_panel()), ("History", self.build_history_panel())]
 
     def toolkit_tool_changed(self, title):
         """Only run the live panels while they're on screen."""
+        if title == "History":
+            self.show_history()
         if title == "LAN speed test":
             self.lan_hosts_changed()
         if title == "Live traffic":
@@ -500,6 +506,182 @@ class ToolkitMixin:
                       3: T.AMBER if days is not None and days < 14 else T.TEXT})
         t.resizeColumnsToContents()
 
+    # ---- DNS speed comparison ----------------------------------------------------------
+
+    def build_dnsbench_panel(self):
+        w, lay = _panel("DNS speed", "How fast your DNS server answers compared with big public ones: for "
+                                     "sites you visit often (usually remembered) and for names it has never seen. "
+                                     "Takes a few seconds; public servers are asked over encrypted DNS.")
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.dnsbench_btn = QPushButton("Compare")
+        self.dnsbench_btn.setObjectName("primary")
+        self.dnsbench_btn.clicked.connect(self.run_dnsbench)
+        row.addWidget(self.dnsbench_btn)
+        lay.addLayout(row)
+        self.dnsbench_table = _table(["DNS server", "How", "Sites you visit", "New names", "Failed"], stretch_col=0)
+        self.dnsbench_table.setMaximumHeight(34 + 30 * 5)
+        lay.addWidget(self.dnsbench_table)
+        self.dnsbench_verdict = QLabel("")
+        self.dnsbench_verdict.setWordWrap(True)
+        lay.addWidget(self.dnsbench_verdict)
+        lay.addStretch(1)
+        return w
+
+    def run_dnsbench(self):
+        self.dnsbench_btn.setEnabled(False)
+        self.dnsbench_verdict.setText("Comparing…")
+        self.worker.run("tk:dnsbench", dns_benchmark)
+
+    def show_dnsbench(self, res):
+        t = self.dnsbench_table
+        rows = res["rows"]
+        t.setRowCount(len(rows))
+        ok = [r for r in rows if r.get("uncached") is not None]
+        best_new = min((r["uncached"] for r in ok), default=None)
+        fmt = lambda v: "—" if v is None else ("under 1 ms" if v < 1 else f"{v:.0f} ms")
+        for i, r in enumerate(rows):
+            if r.get("error"):
+                _set_row(t, i, [r["name"], r["how"], f"no answer: {r['error']}", "", ""], {2: T.AMBER})
+                continue
+            _set_row(t, i, [r["name"], r["how"], fmt(r["cached"]), fmt(r["uncached"]), r["failed"] or ""],
+                     {3: T.GREEN if r["uncached"] == best_new else T.TEXT})
+        t.resizeColumnsToContents()
+        self.dnsbench_verdict.setText(res["verdict"])
+
+    # ---- history -----------------------------------------------------------------------
+
+    HISTORY_VIEWS = [("Devices online", "online", "devices", False),
+                     ("Latency (Monitor tab)", "latency", "ms", False),
+                     ("Packet loss (Monitor tab)", "loss", "%", False),
+                     ("Internet latency (Internet tab checks)", "internet_ms", "ms", True),
+                     ("Speed tests: download", "down", "Mbit/s", True),
+                     ("Speed tests: upload", "up", "Mbit/s", True)]
+
+    def build_history_panel(self):
+        w, lay = _panel("History", "What NetScan has recorded over time while it was open (kept 30 days): devices "
+                                   "online, latency from the Monitor tab, speed tests, and a timeline of outages, "
+                                   "new devices and port changes.")
+        row = QHBoxLayout()
+        self.hist_view = QComboBox()
+        for label, *_rest in self.HISTORY_VIEWS:
+            self.hist_view.addItem(label)
+        self.hist_range = QComboBox()
+        for label, secs in (("Last 24 hours", 86400), ("Last 7 days", 7 * 86400), ("Last 30 days", 30 * 86400)):
+            self.hist_range.addItem(label, secs)
+        for combo in (self.hist_view, self.hist_range):
+            combo.currentIndexChanged.connect(self.show_history)
+        row.addWidget(self.hist_view, 1)
+        row.addWidget(self.hist_range)
+        lay.addLayout(row)
+        self.hist_chart = TimeSeriesChart()
+        lay.addWidget(self.hist_chart, 2)
+        self.hist_events = QTextBrowser()
+        lay.addWidget(self.hist_events, 1)
+        return w
+
+    def show_history(self):
+        label, kind, unit, dots = self.HISTORY_VIEWS[self.hist_view.currentIndex()]
+        until = time.time()
+        since = until - self.hist_range.currentData()
+        if kind == "latency":
+            self.history_avg.flush()  # include the minute in progress
+        data = history_db.series(kind, since)
+        series = [(key, i, points) for i, (key, points) in enumerate(sorted(data.items()))][:8]
+        hint = {"latency": "Add devices on the Monitor tab: their latency is recorded here every minute.",
+                "loss": "Add devices on the Monitor tab: their packet loss is recorded here every minute.",
+                "down": "Run a speed test on the Internet tab to start a history.",
+                "up": "Run a speed test on the Internet tab to start a history.",
+                "internet_ms": "Press Check now on the Internet tab to start a history."}.get(kind, "Run a scan to start.")
+        self.hist_chart.set_data(series, unit, since, until, dots=dots, empty=f"No data for this period yet. {hint}")
+        self.hist_events.setHtml(self.history_events_html(since))
+
+    def history_events_html(self, since):
+        """Outages, new devices and port changes from the device list, newest first."""
+        e = html.escape
+        events = []
+        for mac, d in self.devices.devices.items():
+            name = d.get("nickname") or d.get("hostname") or d.get("ip") or mac
+            for ev in d.get("uptime_log", []):
+                events.append((ev["time"], T.AMBER if ev["state"] == "down" else T.GREEN,
+                               f"{name} went offline" if ev["state"] == "down" else
+                               f"{name} back online" + (f" after {ev['downtime']}" if ev.get("downtime") else "")))
+            if d.get("first_seen"):
+                events.append((d["first_seen"], T.ACCENT_HI, f"New device: {name} ({d.get('vendor') or mac})"))
+            for ch in d.get("port_changes", []):
+                bits = [f"+{x}" for x in ch.get("opened", [])] + [f"−{x}" for x in ch.get("closed", [])]
+                events.append((ch["time"], T.TEXT, f"{name}: ports {' '.join(bits)}"))
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(since))
+        events = sorted((ev for ev in events if ev[0] >= cutoff), reverse=True)[:200]
+        if not events:
+            return f'<p style="color:{T.MUTED}">No outages, new devices or port changes in this period.</p>'
+        return "".join(f'<p><span style="color:{T.MUTED}">{e(t[:16].replace("T", " "))}</span>&nbsp; '
+                       f'<span style="color:{c}">{e(text)}</span></p>' for t, c, text in events)
+
+    # ---- known vulnerabilities (opt-in) --------------------------------------------------
+
+    def check_vulns(self, ip):
+        ports = self.ports.get(ip) or []
+        if not versioned_cpes(ports):
+            QMessageBox.information(self, "NetScan", "No software versions known for this device yet. Tick "
+                                    "“Detect versions (slower)” and run Scan Ports on it first.")
+            return
+        if not self.settings.value("vuln_consent", False, type=bool):
+            answer = QMessageBox.question(
+                self, "Check known vulnerabilities",
+                "This sends the software names and versions found on this device (for example “OpenSSH "
+                "10.0”) to NIST's National Vulnerability Database. No addresses or device names are sent.\n\n"
+                "Allow NetScan to do this when you ask?")
+            if answer != QMessageBox.Yes:
+                return
+            self.settings.setValue("vuln_consent", True)
+        self.status.setText(f"Checking known vulnerabilities for {ip} (the public database allows a few "
+                            "lookups per 30 seconds)…")
+        self.worker.run("tk:vuln", lambda: (ip, host_vulnerabilities(ports)))
+
+    def show_vulns(self, ip, found):
+        e = html.escape
+        color = {"CRITICAL": T.RED, "HIGH": T.RED, "MEDIUM": T.AMBER, "LOW": T.MUTED}
+        total = sum(len(v["vulns"] or []) for v in found.values())
+        parts = [f"<p><b>{e(self.monitor_label(ip))}</b> ({e(ip)}): {total} known issue(s) recorded for the "
+                 "detected software versions.</p>",
+                 f'<p style="color:{T.MUTED}">Matches are by version number only. Linux distributions often fix '
+                 "problems without changing the version (e.g. “OpenSSH 10.0p2 Debian 7+deb13u4”), so some of "
+                 "these may already be patched on this device. Keeping the device updated is what matters.</p>"]
+        for label, info in found.items():
+            parts.append(f"<p><b>{e(label)}</b>: {e(info['product'])}"
+                         f' <span style="color:{T.MUTED}">({e(info["cpe"])})</span></p>')
+            if info["vulns"] is None:
+                parts.append(f'<p style="color:{T.AMBER}">Can\'t check: NVD doesn\'t list this product under the '
+                             "name nmap reported, so no result here doesn't mean it's safe.</p>")
+                continue
+            if not info["vulns"]:
+                parts.append(f'<p style="color:{T.GREEN}">✓ No known issues recorded in NVD for this version.</p>')
+                continue
+            rows = []
+            for v in info["vulns"][:40]:
+                sev = v["severity"] or "?"
+                rows.append((f'<a href="https://nvd.nist.gov/vuln/detail/{e(v["id"])}">{e(v["id"])}</a>',
+                             f'<span style="color:{color.get(sev, T.TEXT)}">{e(sev.title())} {v["score"] or ""}</span>',
+                             e(v["summary"][:180] + ("…" if len(v["summary"]) > 180 else ""))))
+            parts.append(self.html_rows(rows, ["Advisory", "Severity", "Summary"]))
+            if len(info["vulns"]) > 40:
+                parts.append(f'<p style="color:{T.MUTED}">…and {len(info["vulns"]) - 40} more (lower severity).</p>')
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Known vulnerabilities: {ip}")
+        dlg.resize(900, 620)
+        lay = QVBoxLayout(dlg)
+        out = QTextBrowser()
+        out.setOpenExternalLinks(True)
+        out.setHtml("".join(parts))
+        lay.addWidget(out)
+        close = QPushButton("Close")
+        close.clicked.connect(dlg.accept)
+        lay.addWidget(close, 0, Qt.AlignRight)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.show()
+        self.status.setText(f"{total} known issue(s) for {ip}'s detected software; see the window for details.")
+
     # ---- results from the background worker --------------------------------------------
 
     def toolkit_done(self, tag, res):
@@ -540,3 +722,14 @@ class ToolkitMixin:
                 self.show_domain(res)
         elif tag == "web" and not isinstance(res, Exception):
             self.websites_checked(res)
+        elif tag == "vuln":
+            if isinstance(res, Exception):
+                self.status.setText(f"⚠ Vulnerability lookup failed: {getattr(res, 'reason', res)}")
+            else:
+                self.show_vulns(*res)
+        elif tag == "dnsbench":
+            self.dnsbench_btn.setEnabled(True)
+            if isinstance(res, Exception):
+                self.dnsbench_verdict.setText(f"⚠ {res}")
+            else:
+                self.show_dnsbench(res)

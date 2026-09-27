@@ -1,5 +1,6 @@
 """Internet tab: connection check and speed test."""
 
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
+from . import history_db
 from . import theme as T
 from .internet import SPEED_DOWN_BYTES, SPEED_PROVIDERS, SPEED_UP_BYTES, internet_check, speed_test
 from .theme import make_card
@@ -150,6 +152,10 @@ class InternetMixin:
                 detail.setText(f"{res['server']} at {res['when']} · ≈ {res[key] / 8:.1f} MB/s · "
                                f"{res['used_mb']:.0f} MB used"
                                + (f"\n{res['note']}" if res.get("note") and key == "down" else ""))
+            history_db.record_many([(time.time(), "down", res["server"], res["down"]),
+                                    (time.time(), "up", res["server"], res["up"])]
+                                   + ([(time.time(), "bloat", res["server"], res["added_ms"])]
+                                      if res.get("added_ms") is not None else []))
             value, detail = self.speed_tiles["bloat"]
             if res.get("grade"):
                 load = res["loaded_ms"]
@@ -170,6 +176,11 @@ class InternetMixin:
             self.net_when.setText(f"Check failed: {res}")
             return
         t = self.net_tiles
+        now = time.time()
+        history_db.record_many([(now, "internet_ms", name, res[key][0]) for key, name in
+                                (("router", "Router"), ("cf", "Cloudflare"), ("google", "Google"))
+                                if res.get(key) and res[key][0] is not None]
+                               + ([(now, "dns_ms", "DNS lookup", res["dns_ms"])] if res.get("dns_ms") else []))
         self.net_when.setText(f"Checked at {res['when']}." + (" Some checks failed: " + "; ".join(res["errors"])
                                                               if res.get("errors") else ""))
         trace = res.get("trace") or {}

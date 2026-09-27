@@ -8,6 +8,7 @@ from PySide6.QtCore import (
     QProcess, QTimer,
 )
 
+from . import history_db
 from . import theme as T
 from .columns import WATCH_INTERVALS
 from .devices import port_risk
@@ -92,6 +93,7 @@ class WatchMixin:
         if first_run:
             new = []  # the very first check just learns what's normal
         self.online_macs = {h["mac"] for h in hosts if h["mac"]}
+        history_db.record("online", str(net["network"]), len(hosts))
         was = {t for _s, t in self.spoof_warnings}
         self.run_spoof_check({h["ip"]: h["mac"] for h in hosts}, net)
         fresh = [t for sv, t in self.spoof_warnings if sv == "high" and t not in was]

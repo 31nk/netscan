@@ -177,6 +177,7 @@ class ExportMixin:
         for timer in (self.traffic_timer, self.mtr_timer, self.web_timer):
             timer.stop()
         self.lan_server.stop()
+        self.history_avg.flush()
         self.save_notes()
         self.save_settings()
         if self.watch_proc is not None and self.watch_proc.state() != QProcess.NotRunning:

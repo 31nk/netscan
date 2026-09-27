@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from . import history_db
 from . import theme as T
 from .internet import latency_stats
 from .theme import make_card
@@ -28,6 +29,7 @@ class MonitorMixin:
 
     def build_monitor_page(self):
         self.monitored = {}  # ip -> {"slot", "label", "samples": deque[(time, ms or None)]}
+        self.history_avg = history_db.MinuteAverager()
         self.pinger = Pinger()
         self.pinger.result.connect(self.monitor_result)
         self.mon_timer = QTimer(self)
@@ -188,6 +190,7 @@ class MonitorMixin:
     def monitor_result(self, ip, when, ms):
         if ip in self.monitored and not self.mon_pause.isChecked():
             self.monitored[ip]["samples"].append((when, ms))
+            self.history_avg.add(self.monitored[ip]["label"], ms, when)
             if self.tabbar.currentIndex() == 2:
                 self.refresh_monitor()
 

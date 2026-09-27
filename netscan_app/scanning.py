@@ -123,8 +123,9 @@ def parse_ports(elem):
         state = p.find("state")
         if state is None or state.get("state") != "open":
             continue
-        svc = p.find("service")
-        svc = svc.attrib if svc is not None else {}
+        svc_elem = p.find("service")
+        svc = svc_elem.attrib if svc_elem is not None else {}
+        cpes = [c.text for c in svc_elem.findall("cpe") if c.text] if svc_elem is not None else []
         version = " ".join(v for v in (svc.get("product"), svc.get("version"),
                                        svc.get("extrainfo")) if v)
         ports.append({
@@ -132,6 +133,7 @@ def parse_ports(elem):
             "proto": p.get("protocol", "tcp"),
             "service": svc.get("name", ""),
             "version": version,
+            "cpe": cpes,  # e.g. cpe:/a:openbsd:openssh:10.0p2 (with version detection)
         })
     return sorted(ports, key=lambda x: (x["proto"], x["port"]))
 

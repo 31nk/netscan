@@ -704,3 +704,126 @@ class TrafficChart(QWidget):
                 p.setPen(QColor(T.TEXT))
                 p.drawText(QRectF(box.left() + 24, y, width - 30, 16), Qt.AlignLeft | Qt.AlignVCenter, text)
         p.end()
+
+
+class TimeSeriesChart(QWidget):
+    """Lines over a time range (hours to weeks): one axis, series named at their ends (up to 4) and in the
+    tooltip, fixed categorical colours, optional dots for sparse series like speed tests."""
+
+    LEFT, RIGHT, TOP, BOTTOM = 64, 150, 14, 26
+
+    def __init__(self):
+        super().__init__()
+        self.series, self.unit, self.since, self.until, self.dots, self.empty = [], "", 0.0, 1.0, False, ""
+        self.hover_x = None
+        self.setMouseTracking(True)
+        self.setMinimumHeight(220)
+
+    def set_data(self, series, unit, since, until, dots=False, empty="No data for this period yet."):
+        """series: [(label, colour slot, [(ts, value)])]"""
+        self.series, self.unit, self.since, self.until, self.dots, self.empty = series, unit, since, until, dots, empty
+        self.update()
+
+    def leaveEvent(self, _event):
+        self.hover_x = None
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        self.hover_x = event.position().x()
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        small = QFont(self.font())
+        small.setPointSizeF(max(7.5, small.pointSizeF() * 0.85))
+        p.setFont(small)
+        pts = [v for _l, _c, s in self.series for _t, v in s]
+        if not pts:
+            p.setPen(QColor(T.MUTED))
+            p.drawText(self.rect(), Qt.AlignCenter, self.empty)
+            return
+        r = QRectF(self.LEFT, self.TOP, max(10, self.width() - self.LEFT - self.RIGHT),
+                   max(10, self.height() - self.TOP - self.BOTTOM))
+        span = max(self.until - self.since, 1)
+        tick_values, top = LatencyChart.ticks(max(max(pts) * 1.15, 1e-6))
+        x_of = lambda t: r.left() + (t - self.since) / span * r.width()
+        y_of = lambda v: r.bottom() - v / top * r.height()
+        p.setPen(QPen(QColor(T.BORDER), 1))
+        for v in tick_values:
+            y = y_of(v)
+            p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+            p.setPen(QColor(T.MUTED))
+            p.drawText(QRectF(0, y - 8, self.LEFT - 6, 16), Qt.AlignRight | Qt.AlignVCenter, f"{v:g} {self.unit}")
+            p.setPen(QPen(QColor(T.BORDER), 1))
+        fmt = "%H:%M" if span <= 2 * 86400 else "%a %d"
+        for i in range(6):
+            t = self.since + span * i / 5
+            p.setPen(QColor(T.MUTED))
+            p.drawText(QRectF(x_of(t) - 40, r.bottom() + 4, 80, 18), Qt.AlignHCenter | Qt.AlignTop,
+                       datetime.datetime.fromtimestamp(t).strftime(fmt))
+        colors = SERIES_COLORS[T.THEME]
+        labels = []
+        for label, slot, s in self.series:
+            if not s:
+                continue
+            color = QColor(colors[slot % len(colors)])
+            pen = QPen(color, 2)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            path = QPainterPath()
+            gap = span / 60  # don't join points across long silences (NetScan was closed)
+            prev = None
+            for t, v in s:
+                pt = QPointF(x_of(t), y_of(v))
+                path.moveTo(pt) if prev is None or t - prev > gap else path.lineTo(pt)
+                prev = t
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
+            if self.dots or len(s) < 40:
+                p.setBrush(color)
+                p.setPen(QPen(QColor(T.SURFACE), 2))
+                for t, v in s:
+                    p.drawEllipse(QPointF(x_of(t), y_of(v)), 4, 4)
+            labels.append([y_of(s[-1][1]), color, f"{label} {s[-1][1]:.3g}"])
+        if len(labels) <= 4:
+            labels.sort(key=lambda x: x[0])
+            for i in range(1, len(labels)):
+                labels[i][0] = max(labels[i][0], labels[i - 1][0] + 15)
+            for y, color, text in labels:
+                p.setBrush(color)
+                p.setPen(Qt.NoPen)
+                p.drawEllipse(QPointF(r.right() + 10, y), 4, 4)
+                p.setPen(QColor(T.TEXT))
+                p.drawText(QRectF(r.right() + 18, y - 8, self.RIGHT - 20, 16), Qt.AlignLeft | Qt.AlignVCenter,
+                           p.fontMetrics().elidedText(text, Qt.ElideRight, self.RIGHT - 20))
+        if self.hover_x is not None and r.left() <= self.hover_x <= r.right():
+            t = self.since + (self.hover_x - r.left()) / r.width() * span
+            rows = []
+            for label, slot, s in self.series:
+                if s:
+                    near = min(s, key=lambda x: abs(x[0] - t))
+                    if abs(near[0] - t) < span / 30:
+                        rows.append((QColor(colors[slot % len(colors)]), f"{label}  {near[1]:.3g} {self.unit}"))
+            p.setPen(QPen(QColor(T.MUTED), 1, Qt.DashLine))
+            p.drawLine(QPointF(self.hover_x, r.top()), QPointF(self.hover_x, r.bottom()))
+            if rows:
+                fm = p.fontMetrics()
+                head = datetime.datetime.fromtimestamp(t).strftime("%a %d %b %H:%M")
+                width = max([fm.horizontalAdvance(head)] + [fm.horizontalAdvance(x) + 18 for _c, x in rows]) + 20
+                bx = self.hover_x + 12 if self.hover_x + 12 + width < self.width() else self.hover_x - 12 - width
+                box = QRectF(bx, r.top() + 6, width, 22 + 18 * len(rows))
+                p.setPen(QPen(QColor(T.BORDER), 1))
+                p.setBrush(QColor(T.RAISED))
+                p.drawRoundedRect(box, 6, 6)
+                p.setPen(QColor(T.MUTED))
+                p.drawText(QRectF(box.left() + 10, box.top() + 4, width, 16), Qt.AlignLeft, head)
+                for i, (color, text) in enumerate(rows):
+                    y = box.top() + 22 + 18 * i
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(color)
+                    p.drawEllipse(QPointF(box.left() + 14, y + 8), 4, 4)
+                    p.setPen(QColor(T.TEXT))
+                    p.drawText(QRectF(box.left() + 24, y, width - 30, 16), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.end()
