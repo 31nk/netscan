@@ -25,11 +25,14 @@ from .tools import (
 
 # How the Tools list is grouped, in order. Every tool panel must appear here exactly once.
 TOOL_GROUPS = [
+    ("Checkups", ["Slow internet?", "Security checkup", "Router check", "Gaming & calls"]),
+    ("Privacy & exposure", ["VPN & privacy", "What the internet sees"]),
     ("DNS", ["DNS lookup", "DNS speed"]),
     ("Websites & domains", ["HTTP inspector", "Domain toolkit", "Website watch"]),
-    ("Network & Wi-Fi", ["Wi-Fi", "Continuous trace", "LAN speed test", "History"]),
+    ("Network & Wi-Fi", ["Services & web pages", "Wi-Fi", "Wi-Fi survey", "Continuous trace", "LAN speed test"]),
     ("Addresses & ports", ["IP info", "Check ports", "Subnet calculator", "MAC lookup"]),
     ("This computer", ["Connections", "Live traffic"]),
+    ("Over time", ["Outages", "History", "Who's home"]),
 ]
 
 
@@ -101,6 +104,8 @@ class ToolsMixin:
             self.tool_widgets[key] = {"edit": edit, "extra": extra, "run": run, "out": out}
             panels[title] = panel
         panels.update(self.build_toolkit_panels())
+        panels.update(self.build_insight_panels())
+        panels.update(self.build_online_panels())
         for group, names in TOOL_GROUPS:
             head = QListWidgetItem(group.upper())
             head.setFlags(Qt.NoItemFlags)  # a heading: not selectable, skipped by the arrow keys
@@ -117,7 +122,7 @@ class ToolsMixin:
                 self.tool_nav.addItem(item)
         assert not panels, f"tools missing from TOOL_GROUPS: {list(panels)}"
         self.tool_nav.currentRowChanged.connect(self.tool_selected)
-        self.tool_nav.setCurrentRow(self.tool_rows()[0][0])
+        self.tool_nav.setCurrentRow(next(r for r, name in self.tool_rows() if name == "DNS lookup"))
         card, cl, _ = make_card("Tools")
         body = QHBoxLayout()
         body.setSpacing(16)

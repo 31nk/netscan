@@ -263,8 +263,9 @@ def wifi_band(freq_mhz):
     return "6 GHz" if freq_mhz >= 5925 else "5 GHz" if freq_mhz >= 4900 else "2.4 GHz"
 
 
-def wifi_scan():
-    """This computer's Wi-Fi link and the networks around it: [{ssid, bssid, channel, freq, band, signal, security, active}]."""
+def wifi_scan(rescan=False):
+    """This computer's Wi-Fi link and the networks around it:
+    [{ssid, bssid, channel, freq, band, signal, security, cipher, active}]. rescan: fresh readings (Linux; slower)."""
     nets = []
     if IS_WIN:
         cur = run_text("netsh", "wlan", "show", "interfaces")
@@ -276,12 +277,13 @@ def wifi_scan():
                 continue
             ssid = m.group(1).strip()
             sec = (re.search(r"Authentication\s*:\s*(.*)", block) or [None, ""])[1].strip()
+            cipher = (re.search(r"Encryption\s*:\s*(.*)", block) or [None, ""])[1].strip()
             for b in re.finditer(r"BSSID \d+\s*:\s*(\S+).*?Signal\s*:\s*(\d+)%.*?Channel\s*:\s*(\d+)", block, re.S):
                 ch = int(b.group(3))
                 freq = 2407 + 5 * ch if ch <= 14 else 5000 + 5 * ch
                 nets.append({"ssid": ssid, "bssid": b.group(1).lower(), "channel": ch, "freq": freq,
                              "band": wifi_band(freq), "signal": int(b.group(2)), "security": sec,
-                             "active": b.group(1).lower() == cur_bssid})
+                             "cipher": cipher, "active": b.group(1).lower() == cur_bssid})
     elif IS_MAC:
         out = run_text("/usr/sbin/system_profiler", "SPAirPortDataType")
         section = "current"
@@ -302,7 +304,8 @@ def wifi_scan():
                          "security": (re.search(r"Security:\s*(.*)", body) or [None, ""])[1].strip(),
                          "active": section == "current"})
     elif shutil.which("nmcli"):
-        out = run_text("nmcli", "-t", "-f", "ACTIVE,SSID,BSSID,CHAN,FREQ,RATE,SIGNAL,SECURITY", "dev", "wifi", "list")
+        out = run_text("nmcli", "-t", "-f", "ACTIVE,SSID,BSSID,CHAN,FREQ,RATE,SIGNAL,SECURITY,WPA-FLAGS,RSN-FLAGS",
+                       "dev", "wifi", "list", *(["--rescan", "yes"] if rescan else []))
         for line in out.splitlines():
             f = _split_nmcli(line)
             if len(f) < 8:
@@ -310,7 +313,7 @@ def wifi_scan():
             freq = int(re.sub(r"\D", "", f[4]) or 0)
             nets.append({"ssid": f[1] or "(hidden)", "bssid": f[2].lower(), "channel": int(f[3] or 0), "freq": freq,
                          "band": wifi_band(freq), "rate": f[5], "signal": int(f[6] or 0), "security": f[7] or "open",
-                         "active": f[0] == "yes"})
+                         "cipher": " ".join(f[8:10]) if len(f) >= 10 else "", "active": f[0] == "yes"})
     return sorted(nets, key=lambda n: (not n["active"], -(n["signal"] or 0)))
 
 

@@ -14,6 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 TMP = tempfile.mkdtemp(prefix="netscan-test-")
 atexit.register(shutil.rmtree, TMP, True)
+os.environ["NETSCAN_DATA"] = os.path.join(TMP, "data")  # beats a real portable NetScan-data folder too
 
 from PySide6.QtCore import QSettings  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402

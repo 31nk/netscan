@@ -26,7 +26,7 @@ from .devices import risky
 from .discovery import SSDP_ADDR, run_discovery
 from .names import lookup_name
 from .scanning import ip_sort_key
-from .system import IS_MAC, IS_WIN, ping_once
+from .system import IS_MAC, IS_WIN, ping_once, relative_time
 from .tools import traceroute_argv
 
 
@@ -715,13 +715,15 @@ class TimeSeriesChart(QWidget):
     def __init__(self):
         super().__init__()
         self.series, self.unit, self.since, self.until, self.dots, self.empty = [], "", 0.0, 1.0, False, ""
+        self.reference = None  # (value, label): a dashed line such as the speed you pay for
         self.hover_x = None
         self.setMouseTracking(True)
         self.setMinimumHeight(220)
 
-    def set_data(self, series, unit, since, until, dots=False, empty="No data for this period yet."):
-        """series: [(label, colour slot, [(ts, value)])]"""
+    def set_data(self, series, unit, since, until, dots=False, empty="No data for this period yet.", reference=None):
+        """series: [(label, colour slot, [(ts, value)])]; reference: (value, label) or None."""
         self.series, self.unit, self.since, self.until, self.dots, self.empty = series, unit, since, until, dots, empty
+        self.reference = reference
         self.update()
 
     def leaveEvent(self, _event):
@@ -746,7 +748,8 @@ class TimeSeriesChart(QWidget):
         r = QRectF(self.LEFT, self.TOP, max(10, self.width() - self.LEFT - self.RIGHT),
                    max(10, self.height() - self.TOP - self.BOTTOM))
         span = max(self.until - self.since, 1)
-        tick_values, top = LatencyChart.ticks(max(max(pts) * 1.15, 1e-6))
+        tick_values, top = LatencyChart.ticks(max(max(pts + ([self.reference[0]] if self.reference else [])) * 1.15,
+                                                  1e-6))
         x_of = lambda t: r.left() + (t - self.since) / span * r.width()
         y_of = lambda v: r.bottom() - v / top * r.height()
         p.setPen(QPen(QColor(T.BORDER), 1))
@@ -762,6 +765,13 @@ class TimeSeriesChart(QWidget):
             p.setPen(QColor(T.MUTED))
             p.drawText(QRectF(x_of(t) - 40, r.bottom() + 4, 80, 18), Qt.AlignHCenter | Qt.AlignTop,
                        datetime.datetime.fromtimestamp(t).strftime(fmt))
+        if self.reference:
+            value, text = self.reference
+            p.setPen(QPen(QColor(T.MUTED), 1, Qt.DashLine))
+            p.drawLine(QPointF(r.left(), y_of(value)), QPointF(r.right(), y_of(value)))
+            p.setPen(QColor(T.MUTED))
+            p.drawText(QRectF(r.left() + 6, y_of(value) - 17, r.width(), 16), Qt.AlignLeft | Qt.AlignBottom,
+                       f"{text} {value:g} {self.unit}")
         colors = SERIES_COLORS[T.THEME]
         labels = []
         for label, slot, s in self.series:
@@ -826,4 +836,93 @@ class TimeSeriesChart(QWidget):
                     p.drawEllipse(QPointF(box.left() + 14, y + 8), 4, 4)
                     p.setPen(QColor(T.TEXT))
                     p.drawText(QRectF(box.left() + 24, y, width - 30, 16), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.end()
+
+
+class PresenceChart(QWidget):
+    """Who's home: one row per device, one cell per hour. Green = seen online; grey = checked but not seen;
+    blank = NetScan wasn't checking then."""
+
+    ROW, LEFT, RIGHT, TOP, BOTTOM = 26, 180, 120, 4, 22
+
+    def __init__(self):
+        super().__init__()
+        self.rows, self.hours, self.now = [], 24, datetime.datetime.now()
+        self.empty = ""
+        self.setMouseTracking(True)
+        self.set_data([], 24, "")
+
+    def set_data(self, rows, hours, empty, now=None):
+        self.rows, self.hours, self.empty = rows, hours, empty
+        self.now = now or datetime.datetime.now()
+        self.setMinimumHeight(self.TOP + max(len(rows), 3) * self.ROW + self.BOTTOM)
+        self.update()
+
+    def _grid(self):
+        width = max(10, self.width() - self.LEFT - self.RIGHT)
+        return width / self.hours
+
+    def _hour_start(self, i):
+        return (self.now - datetime.timedelta(hours=self.hours - 1 - i)).replace(minute=0, second=0, microsecond=0)
+
+    def mouseMoveEvent(self, event):
+        pos = event.position()
+        row, col = int((pos.y() - self.TOP) // self.ROW), int((pos.x() - self.LEFT) // self._grid())
+        if 0 <= row < len(self.rows) and 0 <= col < self.hours:
+            state = self.rows[row]["cells"][col]
+            when = self._hour_start(col).strftime("%a %H:00")
+            text = {"seen": "online", "away": "not seen", "": "not checked"}[state]
+            QToolTip.showText(event.globalPosition().toPoint(), f"{self.rows[row]['name']}\n{when}: {text}", self)
+        else:
+            QToolTip.hideText()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        if not self.rows:
+            p.setPen(QColor(T.MUTED))
+            p.drawText(self.rect().adjusted(20, 0, -20, 0), Qt.AlignCenter | Qt.TextWordWrap, self.empty)
+            return
+        small = QFont(self.font())
+        small.setPointSizeF(max(7.5, small.pointSizeF() * 0.85))
+        cell = self._grid()
+        fm = p.fontMetrics()
+        for i, r in enumerate(self.rows):
+            y = self.TOP + i * self.ROW
+            p.setPen(QColor(T.TEXT))
+            p.setFont(self.font())
+            p.drawText(QRectF(0, y, self.LEFT - 12, self.ROW), Qt.AlignLeft | Qt.AlignVCenter,
+                       fm.elidedText(r["name"], Qt.ElideRight, self.LEFT - 12))
+            bar = QRectF(self.LEFT, y + 6, cell * self.hours, self.ROW - 12)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(T.HOVER))
+            p.drawRoundedRect(bar, 3, 3)
+            gap = 1 if cell >= 4 else 0
+            for c, state in enumerate(r["cells"]):
+                if not state:
+                    continue
+                p.setBrush(QColor(T.GREEN if state == "seen" else T.DIM))
+                p.drawRoundedRect(QRectF(self.LEFT + c * cell, bar.top(), max(1.0, cell - gap), bar.height()),
+                                  2, 2)
+            p.setFont(small)
+            if r["home_now"]:
+                p.setBrush(QColor(T.GREEN))
+                p.drawEllipse(QPointF(self.width() - self.RIGHT + 16, y + self.ROW / 2), 4, 4)
+                p.setPen(QColor(T.TEXT))
+                label = "online now"
+            else:
+                p.setPen(QColor(T.MUTED))
+                label = f"seen {relative_time(r['last_seen'])}" if r["last_seen"] else ""
+            p.drawText(QRectF(self.width() - self.RIGHT + 26, y, self.RIGHT - 26, self.ROW),
+                       Qt.AlignLeft | Qt.AlignVCenter, label)
+        p.setFont(small)
+        p.setPen(QColor(T.MUTED))
+        y = self.TOP + len(self.rows) * self.ROW + 2
+        for c in range(self.hours):
+            start = self._hour_start(c)
+            daily = self.hours > 48
+            if (daily and start.hour == 0) or (not daily and start.hour % 6 == 0):
+                x = self.LEFT + c * cell
+                p.drawText(QRectF(x - 2, y, 80, self.BOTTOM - 4), Qt.AlignLeft | Qt.AlignVCenter,
+                           start.strftime("%a") if daily else start.strftime("%H:00"))
         p.end()

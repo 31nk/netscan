@@ -69,6 +69,8 @@ CLI_HELP = """NetScan command-line mode
       --no-names                    skip name lookups (faster)
   netscan.py --internet             public IP, DNS, latency to router and internet
   netscan.py --self-test            check nmap and network detection
+  netscan.py --portable             keep devices, history and settings in NetScan-data next to
+                                    netscan.py (for a USB stick), copying this computer's data there
   add --json to --scan/--internet for machine-readable output
 
 examples:

@@ -5,6 +5,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import closing
 
 from .devices import data_dir
 
@@ -29,7 +30,7 @@ def record_many(rows):
         return
     with _LOCK:
         try:
-            with _connect() as db:
+            with closing(_connect()) as db, db:
                 db.executemany("INSERT INTO samples VALUES (?, ?, ?, ?)", rows)
         except sqlite3.Error:
             pass  # history is a nice-to-have; never break a scan over it
@@ -38,7 +39,7 @@ def record_many(rows):
 def prune():
     with _LOCK:
         try:
-            with _connect() as db:
+            with closing(_connect()) as db, db:
                 db.execute("DELETE FROM samples WHERE ts < ?", (time.time() - KEEP_DAYS * 86400,))
         except sqlite3.Error:
             pass
@@ -48,7 +49,7 @@ def series(kind, since, max_points=400):
     """{key: [(ts, value)]} for one kind since a time, averaged into at most max_points buckets per key."""
     with _LOCK:
         try:
-            with _connect() as db:
+            with closing(_connect()) as db, db:
                 rows = db.execute("SELECT ts, key, value FROM samples WHERE kind = ? AND ts >= ? ORDER BY ts",
                                   (kind, since)).fetchall()
         except sqlite3.Error:
@@ -100,3 +101,18 @@ class MinuteAverager:
             rows.append((ts, "loss", label, 100 * (sent - replies) / sent))
         record_many(rows)
         self.acc = {}
+
+
+def rows(kind, since, until=None, key=None):
+    """Raw [(ts, key, value)] for one kind (optionally one key) between two times, oldest first."""
+    sql = "SELECT ts, key, value FROM samples WHERE kind = ? AND ts >= ? AND ts <= ?"
+    args = [kind, since, until or time.time() + 1]
+    if key is not None:
+        sql += " AND key = ?"
+        args.append(key)
+    with _LOCK:
+        try:
+            with closing(_connect()) as db, db:
+                return db.execute(sql + " ORDER BY ts", args).fetchall()
+        except sqlite3.Error:
+            return []

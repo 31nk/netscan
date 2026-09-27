@@ -6,10 +6,10 @@ import urllib.parse
 import urllib.request
 
 from PySide6.QtCore import (
-    Qt,
+    QTimer, Qt,
 )
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from . import history_db
@@ -17,6 +17,9 @@ from . import theme as T
 from .internet import SPEED_DOWN_BYTES, SPEED_PROVIDERS, SPEED_UP_BYTES, internet_check, speed_test
 from .theme import make_card
 from .widgets import Worker
+
+# Automatic speed tests: (label, hours between tests; 0 = off).
+AUTO_SPEED = [("Off", 0), ("Every 3 hours", 3), ("Every 6 hours", 6), ("Once a day", 24)]
 
 
 class InternetMixin:
@@ -55,8 +58,12 @@ class InternetMixin:
         trace_btn.clicked.connect(lambda: self.trace_route("1.1.1.1", "the internet (1.1.1.1)"))
         self.net_when = QLabel("Not checked yet. Contacts Cloudflare (1.1.1.1) only when you press Check now.")
         self.net_when.setObjectName("muted")
+        why_btn = QPushButton("Slow? Find the problem")
+        why_btn.setToolTip("Tools → Slow internet?: finds whether it's your Wi-Fi, the router, your provider or DNS")
+        why_btn.clicked.connect(lambda: (self.open_tool("Slow internet?"), self.run_diagnosis()))
         card, cl, head = make_card("Internet connection")
         head.addWidget(self.net_when, 1)
+        head.addWidget(why_btn)
         head.addWidget(trace_btn)
         head.addWidget(self.net_check_btn)
         grid = QGridLayout()
@@ -88,6 +95,40 @@ class InternetMixin:
         sh.addWidget(self.speed_note, 1)
         sh.addWidget(self.speed_provider)
         sh.addWidget(self.speed_btn)
+        plan_row = QHBoxLayout()
+        plan_row.setSpacing(8)
+        self.plan_spins = {}
+        plan_row.addWidget(QLabel("Your plan:"))
+        for key, label in (("down", "down"), ("up", "up")):
+            spin = QSpinBox()
+            spin.setRange(0, 100_000)
+            spin.setSuffix(f" Mbit/s {label}")
+            spin.setSpecialValueText(f"not set ({label})")
+            spin.setButtonSymbols(QSpinBox.NoButtons)
+            spin.setMinimumWidth(170)
+            spin.setToolTip("The speed your internet plan promises. Speed tests then show the percentage you get, "
+                            "and History marks the line.")
+            spin.setValue(self.settings.value(f"plan_{key}", 0, type=int))
+            spin.valueChanged.connect(lambda v, k=key: self.settings.setValue(f"plan_{k}", v))
+            plan_row.addWidget(spin)
+            self.plan_spins[key] = spin
+        plan_row.addSpacing(16)
+        plan_row.addWidget(QLabel("Test automatically:"))
+        self.auto_speed = QComboBox()
+        for label, hours in AUTO_SPEED:
+            self.auto_speed.addItem(label, hours)
+        self.auto_speed.setToolTip("Runs a speed test on this schedule while NetScan is open, so History shows "
+                                   "whether you get your plan's speed at busy times. Each test uses up to "
+                                   f"{(SPEED_DOWN_BYTES + SPEED_UP_BYTES) // 1_000_000} MB.")
+        saved = self.settings.value("auto_speed_hours", 0, type=int)
+        self.auto_speed.setCurrentIndex(max(0, self.auto_speed.findData(saved)))
+        self.auto_speed.currentIndexChanged.connect(
+            lambda _i: self.settings.setValue("auto_speed_hours", self.auto_speed.currentData()))
+        plan_row.addWidget(self.auto_speed)
+        plan_row.addStretch(1)
+        self.auto_speed_timer = QTimer(self)
+        self.auto_speed_timer.timeout.connect(self.auto_speed_tick)
+        self.auto_speed_timer.start(5 * 60_000)
         row = QHBoxLayout()
         row.setSpacing(10)
         self.speed_tiles = {}
@@ -96,6 +137,7 @@ class InternetMixin:
             row.addWidget(frame)
             self.speed_tiles[key] = (value, detail)
         sl.addLayout(row)
+        sl.addLayout(plan_row)
 
         page = QWidget()
         pl = QVBoxLayout(page)
@@ -110,6 +152,12 @@ class InternetMixin:
         self.net_check_btn.setEnabled(False)
         self.net_when.setText("Checking…")
         self.worker.run("internet", internet_check, self.watch_target()["gateway"] if self.watch_target() else None)
+
+    def auto_speed_tick(self):
+        hours = self.auto_speed.currentData()
+        last = self.settings.value("last_speed_ts", 0.0, type=float)
+        if hours and time.time() - last >= hours * 3600 and self.speed_btn.isEnabled() and self.diag_btn.isEnabled():
+            self.run_speed_test()
 
     def run_speed_test(self):
         self.speed_btn.setEnabled(False)
@@ -137,6 +185,12 @@ class InternetMixin:
         if tag.startswith("tool:"):
             self.tool_done(tag[5:], res)
             return
+        if tag.startswith("in:"):
+            self.insights_done(tag[3:], res)
+            return
+        if tag.startswith("on:"):
+            self.online_done(tag[3:], res)
+            return
         if tag == "speed":
             self.speed_btn.setEnabled(True)
             if isinstance(res, Exception):
@@ -146,31 +200,40 @@ class InternetMixin:
                     detail.setText("Cloudflare's speed test is rate-limiting this connection; choose LibreSpeed or "
                                    "Automatic, or try again later." if busy else f"failed: {res}")
                 return
-            for key in ("down", "up"):
-                value, detail = self.speed_tiles[key]
-                value.setText(f"{res[key]:.0f} Mbit/s")
-                detail.setText(f"{res['server']} at {res['when']} · ≈ {res[key] / 8:.1f} MB/s · "
-                               f"{res['used_mb']:.0f} MB used"
-                               + (f"\n{res['note']}" if res.get("note") and key == "down" else ""))
-            history_db.record_many([(time.time(), "down", res["server"], res["down"]),
-                                    (time.time(), "up", res["server"], res["up"])]
-                                   + ([(time.time(), "bloat", res["server"], res["added_ms"])]
-                                      if res.get("added_ms") is not None else []))
-            value, detail = self.speed_tiles["bloat"]
-            if res.get("grade"):
-                load = res["loaded_ms"]
-                value.setText(f"{res['grade']}  (+{res['added_ms']:.0f} ms)")
-                value.setStyleSheet(f"color: {T.GREEN if res['grade'] in ('A+', 'A') else T.AMBER if res['grade'] in ('B', 'C') else T.RED};")
-                detail.setText(f"latency {res['idle_ms']:.0f} ms idle → "
-                               f"{load['down'] or 0:.0f} ms downloading, {load['up'] or 0:.0f} ms uploading. "
-                               + ("Calls and games stay smooth while the line is busy." if res["grade"] in ("A+", "A")
-                                  else "Lag during downloads/calls; a router with SQM/“smart queue” fixes it."))
-            else:
-                value.setText("—")
-                detail.setText("couldn't ping 1.1.1.1 during the test")
-            return
+            self.speed_finished(res)
         if tag != "internet":
             return
+        self.internet_finished(res)
+
+    def speed_finished(self, res):
+        """Show a finished speed test (from the button, the schedule or Slow internet?) and record it."""
+        self.settings.setValue("last_speed_ts", time.time())
+        plan = self.speed_plan()
+        for key in ("down", "up"):
+            value, detail = self.speed_tiles[key]
+            value.setText(f"{res[key]:.0f} Mbit/s")
+            pct = f" · {100 * res[key] / plan[key]:.0f}% of your plan" if plan and plan.get(key) else ""
+            detail.setText(f"{res['server']} at {res['when']} · ≈ {res[key] / 8:.1f} MB/s · "
+                           f"{res['used_mb']:.0f} MB used{pct}"
+                           + (f"\n{res['note']}" if res.get("note") and key == "down" else ""))
+        history_db.record_many([(time.time(), "down", res["server"], res["down"]),
+                                (time.time(), "up", res["server"], res["up"])]
+                               + ([(time.time(), "bloat", res["server"], res["added_ms"])]
+                                  if res.get("added_ms") is not None else []))
+        value, detail = self.speed_tiles["bloat"]
+        if res.get("grade"):
+            load = res["loaded_ms"]
+            value.setText(f"{res['grade']}  (+{res['added_ms']:.0f} ms)")
+            value.setStyleSheet(f"color: {T.GREEN if res['grade'] in ('A+', 'A') else T.AMBER if res['grade'] in ('B', 'C') else T.RED};")
+            detail.setText(f"latency {res['idle_ms']:.0f} ms idle → "
+                           f"{load['down'] or 0:.0f} ms downloading, {load['up'] or 0:.0f} ms uploading. "
+                           + ("Calls and games stay smooth while the line is busy." if res["grade"] in ("A+", "A")
+                              else "Lag during downloads/calls; a router with SQM/“smart queue” fixes it."))
+        else:
+            value.setText("—")
+            detail.setText("couldn't ping 1.1.1.1 during the test")
+
+    def internet_finished(self, res):
         self.net_check_btn.setEnabled(True)
         if isinstance(res, Exception):
             self.net_when.setText(f"Check failed: {res}")

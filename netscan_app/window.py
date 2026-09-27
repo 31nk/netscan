@@ -4,7 +4,7 @@ import ipaddress
 import re
 
 from PySide6.QtCore import (
-    QSettings, QTimer, Qt,
+    QTimer, Qt,
 )
 from PySide6.QtGui import (
     QAction, QActionGroup, QGuiApplication, QIcon, QKeySequence,
@@ -20,10 +20,12 @@ from . import theme as T
 from .columns import (
     COLUMNS, COL_CHANGE, COL_HOST, COL_INFO, COL_IP, COL_OS, PORT_COLUMNS, WATCH_INTERVALS,
 )
-from .devices import DeviceStore, devices_file
+from .devices import DeviceStore, app_settings, devices_file, portable_dir
 from .devices_tab import DevicesMixin
 from .export import ExportMixin
 from .help import HelpMixin
+from .insights_tab import InsightsMixin
+from .online_tab import OnlineMixin
 from .internet_tab import InternetMixin
 from .map_tab import MapMixin
 from .monitor_tab import MonitorMixin
@@ -42,11 +44,12 @@ from .watch import WatchMixin
 from .widgets import Discovery, NetworkMap, Resolver, SsdpListener, StatusLabel
 
 
-class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin, ToolkitMixin, MapMixin,
+class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin, ToolkitMixin, InsightsMixin, OnlineMixin,
+                 MapMixin,
                  InternetMixin, WatchMixin, PaletteMixin, ExportMixin, HelpMixin, QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NetScan")
+        self.setWindowTitle("NetScan (portable)" if portable_dir() else "NetScan")
         self.resize(1060, 660)
 
         self.nmap = find_program("nmap")
@@ -56,7 +59,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         # On Windows nmap needs no password prompt: Npcap gives it raw packet access.
         self.has_root = bool(self.root) or npcap_installed() or self.nmap_caps
         self.askpass = write_askpass() if IS_MAC and self.root else None
-        self.settings = QSettings("netscan", "netscan")
+        self.settings = app_settings()
         self.proc = None
         self.output = ""
         self.last_xml = ""

@@ -19,7 +19,17 @@ TOOL_KEYWORDS = {
     "LAN speed test": "iperf throughput local", "Domain toolkit": "whois spf dmarc dkim mx email registrar",
     "Website watch": "uptime monitor ssl certificate expiry down",
     "DNS speed": "dns benchmark resolver faster namebench unbound pihole",
-    "History": "history log timeline outages charts past week",
+    "History": "history log timeline outages charts past week plan",
+    "Slow internet?": "diagnose why slow lag troubleshoot problem wizard isp",
+    "Security checkup": "audit grade score secure safety vulnerabilities wps wpa",
+    "Router check": "double nat cgnat port forwarding dhcp rogue open nat",
+    "Wi-Fi survey": "wifi signal rooms dead spot heatmap mesh coverage",
+    "Who's home": "presence people phones timeline online when",
+    "Gaming & calls": "ping latency jitter lag zoom teams game fps cloud gaming stream 4k netflix",
+    "VPN & privacy": "vpn leak dns leak ipv6 privacy mullvad proton wireguard",
+    "What the internet sees": "shodan exposure public ip open ports blacklist blocklist spamhaus hacker",
+    "Services & web pages": "web ui admin page bonjour mdns airplay chromecast printer homekit dashboard",
+    "Outages": "downtime uptime isp report complaint provider log dropped disconnect",
 }
 
 
@@ -117,6 +127,7 @@ class PaletteMixin:
             ("Action", "Trace route to the internet", lambda: self.trace_route("1.1.1.1", "the internet (1.1.1.1)")),
             ("Action", "Wake-on-LAN by MAC", lambda: (self.tabbar.setCurrentIndex(1), self.mac_edit.setFocus())),
             ("Action", "Help", self.show_help),
+            ("Action", "Portable mode (USB stick)", self.show_portable, "portable usb carry sync data folder"),
             ("Action", "Theme: light", lambda: self.retheme("light")),
             ("Action", "Theme: dark", lambda: self.retheme("dark")),
             ("Action", "Theme: system", lambda: self.retheme("system")),

@@ -5,9 +5,10 @@ import datetime
 import json
 import os
 import re
+import shutil
 
 from PySide6.QtCore import (
-    QStandardPaths,
+    QCoreApplication, QSettings, QStandardPaths,
 )
 
 from .discovery import SERVICE_TYPE_HINTS
@@ -15,11 +16,58 @@ from .scanning import ip_sort_key, merge_ports, port_label
 from .system import neighbour_macs, now_iso
 
 
-def data_dir():
-    base = (QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+# Portable mode: a NetScan-data folder next to netscan.py (e.g. on a USB stick) holds the device list, history
+# and settings instead of this computer's app-data folder, so they travel with the app.
+PORTABLE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "NetScan-data")
+
+
+def portable_dir():
+    """The folder NetScan keeps everything in when it isn't the usual per-computer one, else None:
+    $NETSCAN_DATA if set (e.g. a synced folder), or the portable NetScan-data folder if it exists."""
+    return os.environ.get("NETSCAN_DATA") or (PORTABLE_DIR if os.path.isdir(PORTABLE_DIR) else None)
+
+
+def computer_data_dir():
+    # The app-data location includes the application name; without it (command-line mode, before the window
+    # sets it up) Qt would answer with the shared folder of every app, e.g. ~/.local/share itself.
+    if QCoreApplication.applicationName() != "NetScan":
+        QCoreApplication.setApplicationName("NetScan")
+    return (QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
             or os.path.expanduser("~/.local/share/netscan"))
+
+
+def data_dir():
+    base = portable_dir() or computer_data_dir()
     os.makedirs(base, exist_ok=True)
     return base
+
+
+def app_settings():
+    """Preferences: in the portable folder when there is one, else the system's usual place."""
+    folder = portable_dir()
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+        return QSettings(os.path.join(folder, "settings.ini"), QSettings.IniFormat)
+    return QSettings("netscan", "netscan")
+
+
+def make_portable():
+    """Create the portable folder, copying this computer's device list, history and settings into it.
+    Returns (folder, created?)."""
+    if os.path.isdir(PORTABLE_DIR):
+        return PORTABLE_DIR, False
+    source = computer_data_dir()
+    ours = os.path.basename(source.rstrip("/\\")).lower() == "netscan"  # never copy a folder that isn't NetScan's
+    if ours and os.path.isdir(source):
+        shutil.copytree(source, PORTABLE_DIR, ignore=shutil.ignore_patterns("venv", "*.tmp", "__pycache__"))
+    else:
+        os.makedirs(PORTABLE_DIR)
+    old = QSettings("netscan", "netscan")
+    new = QSettings(os.path.join(PORTABLE_DIR, "settings.ini"), QSettings.IniFormat)
+    for key in old.allKeys():
+        new.setValue(key, old.value(key))
+    new.sync()
+    return PORTABLE_DIR, True
 
 
 def devices_file():

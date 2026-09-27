@@ -162,7 +162,10 @@ class _Blob(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Length", str(1 << 20))
         self.end_headers()
-        self.wfile.write(b"\0" * (1 << 20))
+        try:
+            self.wfile.write(b"\0" * (1 << 20))
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the measurement stops reading once its time is up
 
     def log_message(self, *args):
         pass

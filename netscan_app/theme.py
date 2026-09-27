@@ -120,11 +120,11 @@ QListWidget#toolNav::item {{ padding: 8px 10px; border-radius: 8px; color: {MUTE
 QListWidget#toolNav::item:hover {{ background: {HOVER}; color: {TEXT}; }}
 QListWidget#toolNav::item:selected {{ background: {ACCENT}; color: #ffffff; }}
 QListWidget#toolNav::item:disabled {{ background: transparent; color: {DIM}; padding-bottom: 2px; }}
-QLineEdit, QComboBox, QPlainTextEdit {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px;
+QLineEdit, QComboBox, QPlainTextEdit, QSpinBox {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px;
                         padding: 6px 10px; color: {TEXT}; selection-background-color: {ACCENT};
                         selection-color: #ffffff; }}
-QLineEdit:hover, QComboBox:hover, QPlainTextEdit:hover {{ border-color: {BORDER_HI}; }}
-QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
+QLineEdit:hover, QComboBox:hover, QPlainTextEdit:hover, QSpinBox:hover {{ border-color: {BORDER_HI}; }}
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus {{ border-color: {ACCENT}; }}
 QLineEdit:disabled, QComboBox:disabled {{ color: {DIM}; }}
 QComboBox::drop-down {{ border: none; width: 28px; }}
 QComboBox::down-arrow {{ image: url("{chevron}"); width: 12px; height: 12px; }}

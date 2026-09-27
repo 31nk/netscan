@@ -3,10 +3,10 @@
 import html
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QPushButton, QTextBrowser, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QMessageBox, QPushButton, QTextBrowser, QVBoxLayout
 
 from . import theme as T
-from .devices import data_dir
+from .devices import data_dir, make_portable, portable_dir
 from .tools_tab import TOOL_GROUPS
 
 TABS = [
@@ -37,7 +37,18 @@ TOOLS = dict([
     ("Domain toolkit", "Registration, DNS, mail setup (MX/SPF/DMARC/DKIM) and certificate for a domain."),
     ("Website watch", "Get told when a website goes down or its certificate is about to expire."),
     ("DNS speed", "Your DNS against Cloudflare, Google and Quad9, cached and uncached."),
-    ("History", "Devices online, latency, loss and speed tests over the last 30 days."),
+    ("History", "Devices online, latency, loss and speed tests over the last 30 days, with your plan's speed "
+                "marked."),
+    ("Slow internet?", "Finds where the problem is: Wi-Fi, cable, router, internet provider, DNS or bufferbloat."),
+    ("Security checkup", "A grade out of 100 with a fix for each problem found."),
+    ("Router check", "Double NAT or a shared provider address (both break port forwarding), and rogue DHCP servers."),
+    ("Wi-Fi survey", "Measure the signal room by room to find dead spots."),
+    ("Who's home", "Which devices (phones = people) were online, hour by hour."),
+    ("Gaming & calls", "Latency, jitter and loss to cloud regions, graded for calls, games, cloud gaming and 4K."),
+    ("VPN & privacy", "Whether your VPN leaks: IPv6 bypassing it, and which DNS servers see your lookups."),
+    ("What the internet sees", "Ports open on your public address (Shodan), known vulnerabilities, spam blocklists."),
+    ("Services & web pages", "Every device's web page and announced service (AirPlay, printers, shares…)."),
+    ("Outages", "An optional connection watch that logs outages, and a report to send your provider."),
 ])
 
 SHORTCUTS = [("F1", "This help"), ("F5", "Find hosts"), ("Ctrl+K", "Jump to anything (tabs, tools, devices, actions)"),
@@ -46,13 +57,20 @@ SHORTCUTS = [("F1", "This help"), ("F5", "Find hosts"), ("Ctrl+K", "Jump to anyt
 
 ONLINE = [
     ("Internet check", "Cloudflare (1.1.1.1/cdn-cgi/trace) for your public IP; pings to 1.1.1.1 and 8.8.8.8."),
-    ("Speed test", "Cloudflare's speed test, or the nearest public LibreSpeed server."),
+    ("Speed test", "Cloudflare's speed test, or the nearest public LibreSpeed server; also on the schedule you "
+                   "pick (off by default)."),
+    ("Slow internet? / Router check", "Pings to 1.1.1.1 and 8.8.8.8, a DNS lookup and, for Router check, "
+                                      "Cloudflare for your public IP."),
     ("IP info / Domain toolkit", "RDAP registries (rdap.org and the registry it points to), DNS, the site itself."),
     ("Connections", "RDAP (rdap.org) to name who owns each remote address; cached for two weeks."),
     ("DNS speed", "Queries to Cloudflare and Google (DNS-over-HTTPS) and Quad9 (DNS-over-TLS)."),
     ("Known vulnerabilities", "Only when you ask, and only after you agree once: the software name and version "
      "(never an IP address) are sent to the US National Vulnerability Database (nvd.nist.gov). Cached 7 days."),
     ("Website watch / HTTP inspector", "The websites you enter."),
+    ("Gaming & calls", "Pings to 1.1.1.1 and connections to Amazon's cloud regions (no data sent)."),
+    ("VPN & privacy", "Cloudflare (your IPv4 and IPv6 address), RDAP registries, and bash.ws (DNS leak test)."),
+    ("What the internet sees", "Your public IP address, to Shodan's InternetDB and four spam blocklists."),
+    ("Outages (if you turn it on)", "A ping every 30 seconds to 1.1.1.1 and, if that fails, 8.8.8.8."),
 ]
 
 
@@ -77,9 +95,13 @@ class HelpMixin:
                  table(SHORTCUTS, "Keyboard"),
                  table(ONLINE, "What contacts the internet"),
                  f'<p style="color:{T.MUTED}">Scans, the Devices list, the Monitor and the LAN speed test stay on '
-                 "your network. Only Website watch checks the internet on its own, and only for sites you added.</p>",
+                 "your network. Only Website watch, the Outages connection watch and scheduled speed tests contact the "
+                 "internet on their own, and only once you turn them on.</p>",
                  f"<h3 style=\"margin-top:14px\">Your data</h3><p>Devices, history, caches and saved scans live in "
-                 f"<code>{e(data_dir())}</code>. Delete that folder to start fresh.</p>",
+                 f"<code>{e(data_dir())}</code>. Delete that folder to start fresh.</p>"
+                 + ("<p>Portable mode is on: settings are in that folder too, so they travel with NetScan.</p>"
+                    if portable_dir() else "<p>To carry everything on a USB stick, use Portable mode "
+                    "(Ctrl+K → Portable mode, or <code>netscan.py --portable</code>).</p>"),
                  "<h3 style=\"margin-top:14px\">Command line</h3><p><code>netscan.py --scan [--ports] [--json]</code>, "
                  "<code>--internet</code>, <code>--self-test</code>, <code>--help</code>.</p>"]
         dlg = QDialog(self)
@@ -95,3 +117,23 @@ class HelpMixin:
         lay.addWidget(close, 0, Qt.AlignRight)
         dlg.setAttribute(Qt.WA_DeleteOnClose)
         dlg.show()
+
+    def show_portable(self):
+        folder = portable_dir()
+        if folder:
+            QMessageBox.information(self, "Portable mode", f"Portable mode is on. Devices, history and settings are "
+                                    f"kept in:\n\n{folder}\n\nCopy the whole NetScan folder to take them to another "
+                                    "computer. To stop, close NetScan and move or delete that folder.")
+            return
+        answer = QMessageBox.question(
+            self, "Portable mode", "Keep your devices, history and settings in a NetScan-data folder next to "
+            "netscan.py instead of this computer's app-data folder? Copy the NetScan folder to a USB stick and they "
+            "come with you.\n\nThis computer's data is copied there now; restart NetScan to switch.")
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            folder, _created = make_portable()
+        except OSError as err:
+            QMessageBox.warning(self, "Portable mode", f"Couldn't create the folder: {err}")
+            return
+        QMessageBox.information(self, "Portable mode", f"Done: {folder}\n\nRestart NetScan to use it.")

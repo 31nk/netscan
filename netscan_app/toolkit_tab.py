@@ -86,6 +86,10 @@ class ToolkitMixin:
         """Only run the live panels while they're on screen."""
         if title == "History":
             self.show_history()
+        if title == "Who's home":
+            self.show_presence()
+        if title == "Outages":
+            self.show_outages()
         if title == "LAN speed test":
             self.lan_hosts_changed()
         if title == "Live traffic":
@@ -593,7 +597,10 @@ class ToolkitMixin:
                 "down": "Run a speed test on the Internet tab to start a history.",
                 "up": "Run a speed test on the Internet tab to start a history.",
                 "internet_ms": "Press Check now on the Internet tab to start a history."}.get(kind, "Run a scan to start.")
-        self.hist_chart.set_data(series, unit, since, until, dots=dots, empty=f"No data for this period yet. {hint}")
+        plan = self.speed_plan() if kind in ("down", "up") else None
+        reference = (plan[kind], "your plan") if plan and plan.get(kind) else None
+        self.hist_chart.set_data(series, unit, since, until, dots=dots, empty=f"No data for this period yet. {hint}",
+                                 reference=reference)
         self.hist_events.setHtml(self.history_events_html(since))
 
     def history_events_html(self, since):
