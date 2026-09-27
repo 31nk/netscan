@@ -194,6 +194,9 @@ class InsightsMixin:
         res = security_checkup(self.security_context(measured))
         self.last_security = {**res, "when": time.time()}  # for the Dashboard
         self.poke_dashboard()
+        if res["complete"]:
+            self.notice(f"Security checkup: grade {res['grade']} ({res['score']}/100)",
+                        "good" if res["score"] >= 75 else "warn" if res["score"] >= 50 else "bad")
         color = T.GREEN if res["score"] >= 75 else T.AMBER if res["score"] >= 50 else T.RED
         scanned = sum(1 for ip in self.hosts if ip in self.ports)
         if res["complete"]:

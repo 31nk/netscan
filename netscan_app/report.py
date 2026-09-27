@@ -9,9 +9,9 @@ from .scanning import port_label
 
 REPORT_CSS = """
 :root { color-scheme: light; --bg:#f3f4f8; --card:#ffffff; --line:#e1e4ec; --text:#1a1d26; --muted:#667086;
-  --accent:#3b6ef0; --warn:#b45309; --warn-bg:#fef3c7; --good:#0c9467; }
+  --accent:#5a4ff0; --warn:#b45309; --warn-bg:#fef3c7; --good:#0c9467; }
 @media (prefers-color-scheme: dark) { :root { color-scheme: dark; --bg:#0e1016; --card:#151823; --line:#262b3b;
-  --text:#e5e7ee; --muted:#8a90a6; --accent:#7aa2ff; --warn:#fbbf24; --warn-bg:#3a2e0b; --good:#34d399; } }
+  --text:#e5e7ee; --muted:#8a90a6; --accent:#958fff; --warn:#fbbf24; --warn-bg:#3a2e0b; --good:#34d399; } }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 main { max-width: 1200px; margin: 0 auto; padding: 32px 16px 64px; }

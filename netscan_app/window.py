@@ -5,18 +5,20 @@ import os
 import re
 
 from PySide6.QtCore import (
-    QEasingCurve, QPropertyAnimation, QSize, QTimer, Qt,
+    QSize, QTimer, Qt,
 )
 from PySide6.QtGui import (
     QAction, QActionGroup, QGuiApplication, QIcon, QKeySequence,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
+    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
     QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QSizePolicy, QSplitter,
     QStackedWidget, QTabBar, QTableWidget, QVBoxLayout, QWidget,
 )
 
 from . import history_db
+from . import motion
+from .motion import Pulse, SlidingPill, Toast
 from . import theme as T
 from .columns import (
     TAB_DASHBOARD, TAB_DEVICES, TAB_INTERNET, TAB_MAP, TAB_MONITOR, TAB_NAMES, TAB_SCAN, TAB_TOOLS, TAB_TRAFFIC,
@@ -66,6 +68,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.has_root = bool(self.root) or npcap_installed() or self.nmap_caps
         self.askpass = write_askpass() if IS_MAC and self.root else None
         self.settings = app_settings()
+        motion.set_enabled(self.settings.value("animations", True, type=bool))
         self.proc = None
         self.output = ""
         self.last_xml = ""
@@ -203,6 +206,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.open_only_box.toggled.connect(self.apply_filter)
         self.count_label = QLabel("")
         self.count_label.setObjectName("pill")
+        self.count_label.hide()
         self.count_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)  # never clip "13 host(s)"
 
         self.table = QTableWidget(0, len(COLUMNS))
@@ -273,8 +277,8 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.splitter.setHandleWidth(12)
         self.splitter.addWidget(hosts_card)
         self.splitter.addWidget(details_box)
-        self.splitter.setStretchFactor(0, 3)
-        self.splitter.setStretchFactor(1, 2)
+        self.splitter.setStretchFactor(0, 7)
+        self.splitter.setStretchFactor(1, 3)
 
         # Status bar
         self.progress = QProgressBar()
@@ -351,6 +355,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         sl = QHBoxLayout(segment)
         sl.setContentsMargins(0, 0, 0, 0)
         sl.addWidget(self.tabbar)
+        self.tab_pill = SlidingPill(self.tabbar, segment)
         self.theme_btn = QPushButton()
         self.theme_btn.setObjectName("iconMenu")
         self.theme_btn.setIcon(QIcon(icon_path("theme")))
@@ -363,6 +368,13 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
             act.setData(mode)
             self.theme_group.addAction(act)
         self.theme_group.triggered.connect(lambda act: self.retheme(act.data()))
+        theme_menu.addSeparator()
+        self.motion_act = theme_menu.addAction("Animations")
+        self.motion_act.setCheckable(True)
+        self.motion_act.setChecked(motion.enabled())
+        self.motion_act.setToolTip("Short movements when something changes: the tab highlight, the health ring, "
+                                   "notices. Off: everything simply switches.")
+        self.motion_act.toggled.connect(self.set_animations)
         self.theme_btn.setMenu(theme_menu)
         self.help_btn = QPushButton("?")
         self.help_btn.setObjectName("helpButton")
@@ -419,6 +431,8 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         central.setObjectName("central")
         central.setLayout(layout)
         self.setCentralWidget(central)
+        self.toast = Toast(central, bottom_offset=statusbar.height)
+        self.pulse = Pulse(self.status_dot)
 
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -591,7 +605,6 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
 
     def switch_page(self, index):
         self.pages.setCurrentIndex(index)
-        self.fade_in(self.pages.currentWidget())
         for w in (self.compare_btn, self.export_btn):
             w.setVisible(index == TAB_SCAN)
         if index == TAB_DEVICES:
@@ -602,26 +615,25 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
             self.net_map.update()
         if index == TAB_TRAFFIC:
             self.refresh_traffic()
+        if index == TAB_INTERNET:
+            self.refresh_speed_history()
         self.dashboard_shown(index == TAB_DASHBOARD)
 
-    def fade_in(self, page, ms=180):
-        """Fade a page in when its tab opens. The effect is removed afterwards, so it costs nothing while you
-        work (an opacity effect repaints its whole page off-screen)."""
-        if getattr(self, "_fade", None):
-            self._fade.stop()
-            self._fade_page.setGraphicsEffect(None)  # never leave a page half-faded
-        self._fade_page = page
-        effect = QGraphicsOpacityEffect(page)
-        effect.setOpacity(0.0)
-        page.setGraphicsEffect(effect)
-        anim = QPropertyAnimation(effect, b"opacity", self)
-        anim.setDuration(ms)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.finished.connect(lambda: page.setGraphicsEffect(None))
-        self._fade = anim
-        anim.start()
+    def set_animations(self, on):
+        motion.set_enabled(on)
+        self.settings.setValue("animations", on)
+        if not on:
+            self.pulse.stop()
+            self.set_dot(T.ACCENT if self.is_running() else T.GREEN)
+
+    def notice(self, text, level="good"):
+        """A toast in the corner for something that just finished (the status line keeps the details)."""
+        self.toast.show_message(text, level)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "toast"):
+            self.toast.reposition()
 
     def focus_filter(self):
         edit = self.dev_filter if self.tabbar.currentIndex() == TAB_DEVICES else self.filter_edit

@@ -16,7 +16,7 @@ from . import history_db
 from . import theme as T
 from .internet import SPEED_DOWN_BYTES, SPEED_PROVIDERS, SPEED_UP_BYTES, internet_check, speed_test
 from .theme import make_card
-from .widgets import Worker
+from .widgets import TimeSeriesChart, Worker
 
 # Automatic speed tests: (label, hours between tests; 0 = off).
 AUTO_SPEED = [("Off", 0), ("Every 3 hours", 3), ("Every 6 hours", 6), ("Once a day", 24)]
@@ -147,8 +147,24 @@ class InternetMixin:
         pl.setSpacing(12)
         pl.addWidget(card)
         pl.addWidget(speed)
-        pl.addStretch(1)
+        history, hl, hh = make_card("Speed tests, last 30 days")
+        self.speed_history = TimeSeriesChart()
+        self.speed_history.setMinimumHeight(130)
+        hl.addWidget(self.speed_history, 1)
+        pl.addWidget(history, 1)
         return page
+
+    def refresh_speed_history(self):
+        now = time.time()
+        month = now - 30 * 86400
+        merge = lambda data: sorted(p for pts in data.values() for p in pts)
+        series = [(label, i, pts) for i, (label, pts) in enumerate(
+            (("Download", merge(history_db.series("down", month))), ("Upload", merge(history_db.series("up", month)))))
+            if pts]
+        plan = self.speed_plan()
+        self.speed_history.set_data(series, "Mbit/s", month, now, dots=True,
+                                    empty="Your speed tests will be charted here.",
+                                    reference=(plan["down"], "your plan") if plan else None)
 
     def run_internet_check(self):
         self.net_check_btn.setEnabled(False)
@@ -214,6 +230,9 @@ class InternetMixin:
         """Show a finished speed test (from the button, the schedule or Slow internet?) and record it."""
         self.settings.setValue("last_speed_ts", time.time())
         self.poke_dashboard()
+        self.refresh_speed_history()
+        self.notice(f"Speed test: {res['down']:.0f} down / {res['up']:.0f} up Mbit/s"
+                    + (f", bufferbloat {res['grade']}" if res.get("grade") else ""))
         plan = self.speed_plan()
         for key in ("down", "up"):
             value, detail = self.speed_tiles[key]

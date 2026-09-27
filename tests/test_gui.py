@@ -369,24 +369,21 @@ class Window(unittest.TestCase):
         QApplication.processEvents()
         self.assertTrue(win.dash_when.text().startswith("updated"))
 
-    def test_fading_colours(self):
+    def test_status_dots(self):
         from netscan_app.theme import mix, set_tone
         self.assertEqual(mix("#ffffff", "#000000", 0.5), "#808080")
-        self.assertEqual(mix("#ff0000", "#0000ff", 0), "#0000ff")
         win = self.win
         win.last_security = {"score": 40, "grade": "F", "complete": True, "findings": [], "when": 0}
         win.tabbar.setCurrentIndex(TAB_DASHBOARD)
         win.refresh_dashboard()
-        self.assertEqual(win.dash_tiles["security"][0].parentWidget().property("tone"), "bad")
-        set_tone(win.dash_hero, None)
-        self.assertEqual(win.dash_hero.property("tone"), "")
-        win.tabbar.setCurrentIndex(TAB_SCAN)  # the page fades in, then the effect is removed
-        QApplication.processEvents()
-        page = win.pages.currentWidget()
-        self.assertIsNotNone(page.graphicsEffect())
-        win._fade.setCurrentTime(win._fade.duration())
-        QApplication.processEvents()
-        self.assertIsNone(page.graphicsEffect())
+        tile = win.dash_tiles["security"][0].parentWidget()
+        self.assertEqual(tile.property("tone"), "bad")
+        name = tile.findChild(__import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel, "tileLabel")
+        self.assertIn("●", name.text())
+        set_tone(tile, None)
+        self.assertEqual(name.text(), "SECURITY")
+        win.tabbar.setCurrentIndex(TAB_SCAN)  # tabs switch instantly: no fade effect
+        self.assertIsNone(win.pages.currentWidget().graphicsEffect())
 
     def test_dashboard_takes_you_there(self):
         from PySide6.QtCore import QUrl
@@ -437,6 +434,42 @@ class Window(unittest.TestCase):
             win.tabbar.setCurrentIndex(TAB_DASHBOARD)
             next(b for b in win.dash_actions if b.text() == label).click()
             self.assertEqual((win.tabbar.tabText(win.tabbar.currentIndex()), win.tool_nav.currentItem().text()), (tab, tool))
+
+    def test_motion(self):
+        from netscan_app import motion
+        win = self.win
+
+        def finish(anim):
+            if anim is not None:
+                anim.setCurrentTime(anim.duration())
+            QApplication.processEvents()
+
+        for on in (True, False):
+            win.set_animations(on)
+            for tab in (TAB_TOOLS, TAB_SCAN):
+                win.tabbar.setCurrentIndex(tab)
+                QApplication.processEvents()
+                finish(win.tab_pill.anim)
+                self.assertEqual(win.tab_pill.pill.geometry(), win.tab_pill.target(), (on, tab))
+        win.set_animations(True)
+        self.assertTrue(motion.enabled())
+        ring = win.dash_ring
+        ring.set_score(40, "health")
+        finish(ring._sweep)
+        ring.set_score(90, "health")
+        finish(ring._sweep)
+        self.assertEqual(ring.score, 90)
+        win.notice("Scan finished: 3 devices")
+        finish(win.toast.anim)
+        self.assertTrue(win.toast.isVisible())
+        self.assertEqual(win.toast.text.text(), "Scan finished: 3 devices")
+        win.toast.dismiss()
+        finish(win.toast.anim)
+        self.assertFalse(win.toast.isVisible())
+        win.set_busy(True)
+        self.assertEqual(win.pulse.anim.state(), win.pulse.anim.State.Running)
+        win.set_busy(False)
+        self.assertNotEqual(win.pulse.anim.state(), win.pulse.anim.State.Running)
 
     def test_tab_order(self):
         win = self.win

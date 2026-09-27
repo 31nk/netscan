@@ -15,7 +15,7 @@ from .devices import risky
 from .insights_tab import findings_html
 from .outages import LATENCY_KEY
 from .theme import icon_path, make_card, set_tone
-from .widgets import HealthRing, TimeSeriesChart
+from .widgets import HealthRing, TimeSeriesChart, short_ip
 
 
 # Where each Dashboard tile takes you: (target, words for the tooltip).
@@ -360,7 +360,7 @@ class DashboardMixin:
         day_ago = datetime.datetime.fromtimestamp(now - 86400).isoformat()
         new, changed = [], []
         for mac, d in self.devices.devices.items():
-            name = d.get("nickname") or d.get("hostname") or d.get("ip") or mac
+            name = d.get("nickname") or d.get("hostname") or short_ip(d.get("ip") or "") or mac
             if d.get("first_seen", "") >= day_ago:
                 when = datetime.datetime.fromisoformat(d["first_seen"]).strftime("%a %H:%M")
                 new.append((name, f"{d.get('vendor') or mac}, first seen {when}."))

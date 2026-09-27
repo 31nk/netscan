@@ -16,20 +16,21 @@ from PySide6.QtWidgets import (
 # ---- theme -----------------------------------------------------------------
 
 THEMES = {
+    # Neutral greys (no blue cast), one violet-indigo accent, and status colours soft enough to sit together.
     "dark": dict(
-        BG="#0e1016", SURFACE="#151823", RAISED="#1c2030", BORDER="#262b3b", BORDER_HI="#363d54",
-        TEXT="#e5e7ee", MUTED="#8a90a6", DIM="#565c70", ACCENT="#5b8cff", ACCENT_HI="#7aa2ff",
-        GREEN="#34d399", AMBER="#fbbf24", RED="#f87171",
-        HOVER="#232839", PRESSED="#171a26", PRIMARY_PRESSED="#4a78e6", PRIMARY_OFF_BG="#26304d",
-        PRIMARY_OFF_FG="#6f7899", ALT_ROW="#181b27", ROW_LINE="#1d2130", SCROLL="#2d3345",
-        SCROLL_HI="#3b4259", SELECT="#26355c", SELECT_TEXT="#ffffff"),
+        BG="#0c0c0f", SURFACE="#141418", RAISED="#1b1b21", BORDER="#26262e", BORDER_HI="#363640",
+        TEXT="#ececf1", MUTED="#8d8d99", DIM="#5a5a66", ACCENT="#7b73ff", ACCENT_HI="#958fff",
+        GREEN="#4ccf95", AMBER="#f2b454", RED="#f47a7a",
+        HOVER="#202027", PRESSED="#18181d", PRIMARY_PRESSED="#6a61f0", PRIMARY_OFF_BG="#2a2940",
+        PRIMARY_OFF_FG="#7d7a9e", ALT_ROW="#16161b", ROW_LINE="#1d1d23", SCROLL="#2c2c35",
+        SCROLL_HI="#3c3c47", SELECT="#2a2850", SELECT_TEXT="#ffffff"),
     "light": dict(
-        BG="#f3f4f8", SURFACE="#ffffff", RAISED="#eef0f5", BORDER="#e1e4ec", BORDER_HI="#c9cfdb",
-        TEXT="#1a1d26", MUTED="#667086", DIM="#a3a9ba", ACCENT="#3b6ef0", ACCENT_HI="#2c5ed8",
-        GREEN="#0c9467", AMBER="#b45309", RED="#dc2626",
-        HOVER="#e6e9f1", PRESSED="#dce0ea", PRIMARY_PRESSED="#2c5ed8", PRIMARY_OFF_BG="#c7d4f7",
-        PRIMARY_OFF_FG="#ffffff", ALT_ROW="#fafbfd", ROW_LINE="#eef0f5", SCROLL="#ccd2de",
-        SCROLL_HI="#b1b9c9", SELECT="#dbe5fd", SELECT_TEXT="#1a1d26"),
+        BG="#f6f6f8", SURFACE="#ffffff", RAISED="#f0f0f3", BORDER="#e4e4e9", BORDER_HI="#cfcfd8",
+        TEXT="#16161b", MUTED="#686874", DIM="#a7a7b3", ACCENT="#5a4ff0", ACCENT_HI="#4a3fe0",
+        GREEN="#12915c", AMBER="#b8650a", RED="#d63a3a",
+        HOVER="#ececf1", PRESSED="#e3e3ea", PRIMARY_PRESSED="#4a3fe0", PRIMARY_OFF_BG="#d4d1fb",
+        PRIMARY_OFF_FG="#ffffff", ALT_ROW="#fafafb", ROW_LINE="#f0f0f3", SCROLL="#d2d2da",
+        SCROLL_HI="#b6b6c2", SELECT="#e6e4fe", SELECT_TEXT="#16161b"),
 }
 THEME_MODES = ["system", "light", "dark"]
 THEME = "dark"
@@ -106,9 +107,7 @@ def icon_svgs():
 
 
 STYLESHEET = """
-QMainWindow {{ background: {BG}; }}
-QWidget#central {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {glow}, stop:0.38 {BG},
-                                               stop:0.72 {BG}, stop:1 {glow2}); }}
+QMainWindow, QWidget#central {{ background: {BG}; }}
 QToolTip {{ background: {RAISED}; color: {TEXT}; border: 1px solid {BORDER}; padding: 6px; }}
 
 QLabel#title {{ font-size: 17pt; font-weight: 700; }}
@@ -119,26 +118,10 @@ QLabel#heroTitle {{ font-size: 18pt; font-weight: 700; }}
 QLabel#pill {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 11px;
                padding: 3px 11px; color: {MUTED}; }}
 
-QFrame#card {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {card_top}, stop:1 {SURFACE});
-                border: 1px solid {BORDER}; border-radius: 12px; }}
-QFrame#card[tone="good"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {good_tint}, stop:0.65 {SURFACE});
-                            border-color: {good_line}; }}
-QFrame#card[tone="warn"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {warn_tint}, stop:0.65 {SURFACE});
-                            border-color: {warn_line}; }}
-QFrame#card[tone="bad"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {bad_tint}, stop:0.65 {SURFACE});
-                           border-color: {bad_line}; }}
+QFrame#card {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px; }}
 QFrame#statusbar {{ background: {SURFACE}; border-top: 1px solid {BORDER}; }}
-QFrame#tile {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {tile_top}, stop:1 {BG});
-                border: 1px solid {BORDER}; border-radius: 10px; }}
-QFrame#tile[tone="good"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {good_tint}, stop:0.7 {BG});
-                            border-color: {good_line}; }}
-QFrame#tile[tone="warn"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {warn_tint}, stop:0.7 {BG});
-                            border-color: {warn_line}; }}
-QFrame#tile[tone="bad"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {bad_tint}, stop:0.7 {BG});
-                           border-color: {bad_line}; }}
+QFrame#tile {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 10px; }}
 QFrame#tile[link="true"]:hover, QFrame#card[link="true"]:hover {{ border-color: {ACCENT}; }}
-QFrame#tile[tone="accent"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {accent_tint}, stop:0.7 {BG});
-                              border-color: {accent_line}; }}
 QLabel#tileValue {{ font-size: 16pt; font-weight: 700; }}
 QLabel#tileLabel {{ color: {MUTED}; font-size: 8pt; font-weight: 700; }}
 QScrollArea#plain, QScrollArea#plain > QWidget > QWidget {{ background: transparent; border: none; }}
@@ -148,8 +131,8 @@ QPushButton {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 
 QPushButton:hover {{ background: {HOVER}; border-color: {BORDER_HI}; }}
 QPushButton:pressed {{ background: {PRESSED}; }}
 QPushButton:disabled {{ color: {DIM}; background: {SURFACE}; border-color: {BORDER}; }}
-QPushButton#primary {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {accent_top}, stop:1 {ACCENT});
-                       border: 1px solid {ACCENT}; color: #ffffff; font-weight: 600; padding: 7px 20px; }}
+QPushButton#primary {{ background: {ACCENT}; border: 1px solid {ACCENT}; color: #ffffff;
+                       font-weight: 600; padding: 7px 20px; }}
 QPushButton#primary:hover {{ background: {ACCENT_HI}; border-color: {ACCENT_HI}; }}
 QPushButton#action {{ text-align: left; padding: 9px 12px; }}
 QPushButton#chip {{ border-radius: 11px; padding: 3px 12px; min-height: 16px; color: {MUTED}; background: transparent; }}
@@ -169,8 +152,7 @@ QTextBrowser {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px
 QListWidget#toolNav {{ background: transparent; border: none; outline: 0; }}
 QListWidget#toolNav::item {{ padding: 8px 10px; border-radius: 8px; color: {MUTED}; }}
 QListWidget#toolNav::item:hover {{ background: {HOVER}; color: {TEXT}; }}
-QListWidget#toolNav::item:selected {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT},
-                                                                   stop:1 {accent_top}); color: #ffffff; }}
+QListWidget#toolNav::item:selected {{ background: {ACCENT}; color: #ffffff; }}
 QListWidget#toolNav::item:disabled {{ background: transparent; color: {DIM}; padding-bottom: 2px; }}
 QLineEdit, QComboBox, QPlainTextEdit, QSpinBox {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 8px;
                         padding: 6px 10px; color: {TEXT}; selection-background-color: {ACCENT};
@@ -225,8 +207,10 @@ QTabBar#pages {{ background: transparent; }}
 QTabBar#pages::tab {{ background: transparent; color: {MUTED}; border: none; border-radius: 8px;
                       padding: 7px 11px; margin: 2px; font-weight: 600; }}
 QTabBar#pages::tab:hover:!selected {{ color: {TEXT}; background: {HOVER}; }}
-QTabBar#pages::tab:selected {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {accent_top},
-                                                           stop:1 {ACCENT}); color: #ffffff; }}
+QTabBar#pages::tab:selected {{ background: transparent; color: #ffffff; }}
+QFrame#tabPill {{ background: {ACCENT}; border-radius: 8px; }}
+QFrame#toast {{ background: {RAISED}; border: 1px solid {BORDER_HI}; border-radius: 10px; }}
+QLabel#toastText {{ color: {TEXT}; }}
 
 QMenu {{ background: {RAISED}; border: 1px solid {BORDER}; padding: 6px; color: {TEXT}; }}
 QMenu::item {{ padding: 6px 22px 6px 14px; border-radius: 6px; }}
@@ -296,20 +280,7 @@ def apply_theme(app, mode="system"):
     for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
         pal.setColor(QPalette.Disabled, role, QColor(DIM))
     app.setPalette(pal)
-    dark = THEME == "dark"
-    tint = 0.16 if dark else 0.10
-    app.setStyleSheet(STYLESHEET.format(
-        **THEMES[THEME], check=icon_path("check"), chevron=icon_path("chevron"),
-        accent_top=QColor(ACCENT).lighter(118).name(),
-        # Colour that fades: a glow of the accent in the top corner and violet in the bottom one, cards a touch
-        # lighter at the top, and status tints that fade from a corner of a tile or card into its background.
-        glow=mix(ACCENT, BG, 0.13 if dark else 0.09), glow2=mix("#8b5cf6", BG, 0.09 if dark else 0.06),
-        card_top=mix("#ffffff", SURFACE, 0.035) if dark else SURFACE,
-        tile_top=mix("#ffffff", BG, 0.03) if dark else mix("#ffffff", BG, 0.6),
-        good_tint=mix(GREEN, BG, tint), warn_tint=mix(AMBER, BG, tint), bad_tint=mix(RED, BG, tint),
-        accent_tint=mix(ACCENT, BG, tint),
-        good_line=mix(GREEN, BORDER, 0.35), warn_line=mix(AMBER, BORDER, 0.35), bad_line=mix(RED, BORDER, 0.35),
-        accent_line=mix(ACCENT, BORDER, 0.35)))
+    app.setStyleSheet(STYLESHEET.format(**THEMES[THEME], check=icon_path("check"), chevron=icon_path("chevron")))
 
 
 def mix(color, into, amount):
@@ -320,11 +291,20 @@ def mix(color, into, amount):
 
 
 def set_tone(widget, tone):
-    """Tint a tile or card by status ("good", "warn", "bad", "accent" or "" for none); the stylesheet fades it."""
-    if widget.property("tone") != (tone or ""):
-        widget.setProperty("tone", tone or "")
-        widget.style().unpolish(widget)
-        widget.style().polish(widget)
+    """Mark a tile's state ("good", "warn", "bad", "accent", or "" / None for none) with a small coloured dot
+    beside its name. Cards (no name label) just keep the state as a property."""
+    tone = tone or ""
+    if widget.property("tone") == tone:
+        return
+    widget.setProperty("tone", tone)
+    name = widget.findChild(QLabel, "tileLabel")
+    if name is None:
+        return
+    if name.property("plain") is None:
+        name.setProperty("plain", name.text())
+    color = {"good": GREEN, "warn": AMBER, "bad": RED, "accent": ACCENT}.get(tone)
+    name.setText(f'<span style="color:{color}">●</span>&nbsp; {name.property("plain")}' if color
+                 else name.property("plain"))
 
 
 def mono_font():

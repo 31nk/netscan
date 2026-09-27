@@ -160,6 +160,11 @@ class ScanMixin:
 
     def set_busy(self, busy):
         self.set_dot(T.ACCENT if busy else T.GREEN)
+        if busy:
+            self.pulse.start()
+        else:
+            self.pulse.stop()
+            self.set_dot(T.GREEN)
         self.progress.setVisible(busy)
         self.progress.setRange(0, 0)  # indeterminate until nmap reports %
         self.progress.setFormat("%p%")
@@ -354,6 +359,9 @@ class ScanMixin:
         if self.current:
             self.start_discovery(names=True, ips=list(self.hosts))
         self.poke_dashboard()
+        self.notice(f"Scan finished: {n} device{'s' if n != 1 else ''}"
+                    + (f", {len(self.new_devices)} new" if self.new_devices else ""),
+                    "warn" if self.new_devices else "good")
 
     def update_status(self):
         extra = f" Looking up {len(self.pending)} name(s)…" if self.pending else ""
@@ -700,6 +708,7 @@ class ScanMixin:
         total = self.table.rowCount()
         shown = sum(not self.table.isRowHidden(r) for r in range(total))
         self.count_label.setText(f"{shown} of {total} shown" if shown != total else f"{total} host(s)")
+        self.count_label.setVisible(total > 0)  # no empty badge before the first scan
 
     def visible_ips(self):
         return [self.table.item(r, COL_IP).text() for r in range(self.table.rowCount())
@@ -823,6 +832,9 @@ class ScanMixin:
             save_history(self.scan_record(), self.history_path)
         self.refresh_devices()
         self.update_status()
+        risky_now = sum(1 for ip in self.scan_ips if risky(self.network_ports(ip)))
+        self.notice(f"Port scan finished: {total} open port{'s' if total != 1 else ''}"
+                    + (f", risky services on {risky_now} device(s)" if risky_now else ""), "warn" if risky_now else "good")
         if self.current:
             self.start_discovery(names=False, ips=self.scan_ips)
 

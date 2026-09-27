@@ -436,6 +436,7 @@ class WorkMixin:
             f.write(page)
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
         self.audit_note.setText(f"Saved {path}. To make a PDF, print it from the browser.")
+        self.notice("Site audit saved and opened")
 
     def export_inventory(self):
         name = "".join(c if c.isalnum() else "-" for c in self.sites.name()).strip("-").lower() or "site"
@@ -732,6 +733,7 @@ class WorkMixin:
                 f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
         QGuiApplication.clipboard().setText(f"{head}\n{'=' * len(head)}\n{body}\n")
         self.status.setText(f"Copied “{title}” for a ticket ({len(body.splitlines())} lines).")
+        self.notice(f"Copied “{title}” for a ticket")
 
     # ---- results from the background worker -----------------------------------------------------------
 

@@ -14,8 +14,7 @@ from PySide6.QtCore import (
     QEvent, QObject, QPointF, QProcess, QRectF, Qt, Signal,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QConicalGradient, QFont, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPen,
-    QTextCursor,
+    QColor, QFont, QFontDatabase, QPainter, QPainterPath, QPen, QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QStyle, QStyledItemDelegate,
@@ -175,27 +174,6 @@ def short_ip(ip):
     return f"{parts[0]}::…{parts[-1]}"
 
 
-def fill_under(p, segments, color, bottom):
-    """A soft fade under a line: each unbroken run of points, filled down to the baseline, from a tint of the
-    line's colour to nothing. Drawn before the line so the line stays crisp on top."""
-    for pts in segments:
-        if len(pts) < 2:
-            continue
-        top = min(pt.y() for pt in pts)
-        grad = QLinearGradient(0, top, 0, bottom)
-        tint = QColor(color)
-        tint.setAlpha(70 if T.THEME == "dark" else 55)
-        grad.setColorAt(0, tint)
-        tint.setAlpha(0)
-        grad.setColorAt(1, tint)
-        area = QPainterPath(QPointF(pts[0].x(), bottom))
-        for pt in pts:
-            area.lineTo(pt)
-        area.lineTo(QPointF(pts[-1].x(), bottom))
-        area.closeSubpath()
-        p.fillPath(area, QBrush(grad))
-
-
 class Pinger(QObject):
     """Pings each monitored address on a timer, in the background; one ping in flight per address."""
 
@@ -303,19 +281,14 @@ class LatencyChart(QWidget):
             pen = QPen(QColor(color), 2)
             pen.setCapStyle(Qt.RoundCap)
             pen.setJoinStyle(Qt.RoundJoin)
-            path, drawing, segments = QPainterPath(), False, []
+            path, drawing = QPainterPath(), False
             for t, ms in samples:
                 if ms is None:
                     drawing = False
                     continue
                 pt = QPointF(x_of(t), y_of(ms))
                 path.lineTo(pt) if drawing else path.moveTo(pt)
-                if not drawing:
-                    segments.append([])
-                segments[-1].append(pt)
                 drawing = True
-            if len(series) <= 3:  # more fills than that turn to mud
-                fill_under(p, segments, color, r.bottom())
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
@@ -849,18 +822,11 @@ class TimeSeriesChart(QWidget):
             pen.setJoinStyle(Qt.RoundJoin)
             path = QPainterPath()
             gap = span / 60  # don't join points across long silences (NetScan was closed)
-            prev, segments = None, []
+            prev = None
             for t, v in s:
                 pt = QPointF(x_of(t), y_of(v))
-                if prev is None or t - prev > gap:
-                    path.moveTo(pt)
-                    segments.append([pt])
-                else:
-                    path.lineTo(pt)
-                    segments[-1].append(pt)
+                path.moveTo(pt) if prev is None or t - prev > gap else path.lineTo(pt)
                 prev = t
-            if len(self.series) <= 3 and not self.dots:
-                fill_under(p, segments, color, r.bottom())
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
@@ -1006,12 +972,24 @@ class HealthRing(QWidget):
 
     def __init__(self, size=132):
         super().__init__()
-        self.score, self.caption = None, ""
+        self.score, self.caption, self.target = None, "", None
+        self._sweep = None
         self.setFixedSize(size, size)
 
     def set_score(self, score, caption):
-        self.score, self.caption = score, caption
-        self.update()
+        """Sweep from the score on screen to the new one (or jump, with animations off)."""
+        from . import motion  # late: motion imports theme, as this module does
+        self.caption = caption
+        if score == self.target and self.score == score:
+            return
+        self.target = score
+
+        def frame(v):
+            self.score = None if v is None else round(v)
+            self.update()
+
+        self._sweep = motion.sweep(self.score if self.score is not None else 0 if score is not None else None,
+                                   score, frame)
 
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -1023,13 +1001,8 @@ class HealthRing(QWidget):
         p.setPen(track)
         p.drawArc(box, 225 * 16, -270 * 16)
         if self.score is not None:
-            end = QColor(T.GREEN if self.score >= 85 else T.AMBER if self.score >= 60 else T.RED)
-            start = QColor(T.ACCENT if self.score >= 85 else T.GREEN if self.score >= 60 else T.AMBER)
-            grad = QConicalGradient(box.center(), 225)  # fades along the arc, from where it starts
-            grad.setColorAt(0.0, start)
-            grad.setColorAt(0.75 * max(0.05, self.score / 100), end)
-            grad.setColorAt(1.0, end)
-            arc = QPen(QBrush(grad), width)
+            color = QColor(T.GREEN if self.score >= 85 else T.AMBER if self.score >= 60 else T.RED)
+            arc = QPen(color, width)
             arc.setCapStyle(Qt.RoundCap)
             p.setPen(arc)
             p.drawArc(box, 225 * 16, int(-270 * 16 * max(0.02, self.score / 100)))
