@@ -82,6 +82,7 @@ class UptimeMixin:
                     self.status.setText(f"⚠ {name} ({rec.get('ip', '')}) went offline.")
         if self.tabbar.currentIndex() == TAB_DEVICES:
             self.refresh_devices()
+        self.poke_dashboard()
 
     def uptime_log(self, rec, state, downtime=None):
         log = rec.setdefault("uptime_log", [])

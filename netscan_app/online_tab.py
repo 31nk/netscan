@@ -363,6 +363,8 @@ class OnlineMixin:
              f"{time.strftime('%H:%M', time.localtime(ongoing['start']))}" if ongoing else
              f"Connection fine at {time.strftime('%H:%M:%S')}"
              + (f" · internet {internet:.0f} ms" if internet is not None else "")))
+        if event:
+            self.poke_dashboard()
         if event and self.tool_nav.currentItem() and self.tool_nav.currentItem().text() == "Outages":
             self.show_outages()
 

@@ -343,6 +343,32 @@ class Window(unittest.TestCase):
         self.win.tabbar.setCurrentIndex(TAB_DASHBOARD)
         self.assertIn(self.win.dash_headline.text(), ("Healthy", "Needs a look", "Trouble", "Not enough data yet"))
 
+    def test_this_computer_is_never_another_device(self):
+        win = self.win
+        net = {"iface": "eth0", "network": __import__("ipaddress").ip_network("10.9.9.0/24"), "local_ip": "10.9.9.45",
+               "gateway": "10.9.9.1", "mac": "AA:00:00:00:00:45"}
+        wifi = {**net, "iface": "wlan0", "local_ip": "10.9.9.46", "mac": "AA:00:00:00:00:46"}
+        saved = (win.networks, win.current)
+        win.networks, win.current = [net, wifi], net
+        try:
+            self.assertEqual(win.add_found_host("10.9.9.46"), 0)                          # our Wi-Fi's IPv4
+            self.assertEqual(win.add_found_host("fe80::1", "AA:00:00:00:00:46"), 0)     # our Wi-Fi over IPv6
+            self.assertEqual(win.apply_ipv6({"aa:00:00:00:00:46": ["fe80::1"]}), 0)
+        finally:
+            win.networks, win.current = saved
+
+    def test_short_labels_and_fresh_dashboard(self):
+        from netscan_app.widgets import short_ip
+        self.assertEqual(short_ip("fe80::1c7c:faff:fe19:6c55"), "fe80::…6c55")
+        self.assertEqual(short_ip("192.168.1.10"), "192.168.1.10")
+        win = self.win
+        win.tabbar.setCurrentIndex(TAB_DASHBOARD)
+        win.dash_when.setText("")
+        win.poke_dashboard()
+        win.poke_dashboard()  # several results at once: one refresh
+        QApplication.processEvents()
+        self.assertTrue(win.dash_when.text().startswith("updated"))
+
     def test_tab_order(self):
         win = self.win
         self.assertEqual([win.tabbar.tabText(i) for i in range(win.tabbar.count())],

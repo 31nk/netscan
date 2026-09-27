@@ -23,13 +23,14 @@ from .probes import (
 )
 from .scanning import ip_sort_key
 from .vulns import host_vulnerabilities, versioned_cpes
-from .widgets import Pinger, TimeSeriesChart, TrafficChart, notify
+from .widgets import Pinger, RowHover, TimeSeriesChart, TrafficChart, notify
 
 WEB_WATCH_MINUTES = 5
 
 
 def _table(headers, stretch_col=None):
     t = QTableWidget(0, len(headers))
+    RowHover(t)
     t.setHorizontalHeaderLabels([h.upper() for h in headers])
     t.setEditTriggers(QAbstractItemView.NoEditTriggers)
     t.setSelectionBehavior(QAbstractItemView.SelectRows)

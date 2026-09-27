@@ -139,6 +139,7 @@ class ScanMixin:
             act.setChecked(act.data() == mode)
         self.search_act.setIcon(QIcon(icon_path("search")))
         self.theme_btn.setIcon(QIcon(icon_path("theme")))
+        self.refresh_tool_icons()
         self.dev_search_act.setIcon(QIcon(icon_path("search")))
         for i in range(1, self.detail_type.count()):
             self.detail_type.setItemIcon(i, QIcon(icon_path("type-" + self.detail_type.itemData(i))))
@@ -352,6 +353,7 @@ class ScanMixin:
             self.set_dot(T.RED)
         if self.current:
             self.start_discovery(names=True, ips=list(self.hosts))
+        self.poke_dashboard()
 
     def update_status(self):
         extra = f" Looking up {len(self.pending)} name(s)…" if self.pending else ""
@@ -580,7 +582,8 @@ class ScanMixin:
     def add_found_host(self, ip, mac=None, ipv6=None):
         """Add a device another discovery method found on this network (1 if added, else 0)."""
         net = self.current
-        if not net or ip in self.hosts or ip == net["local_ip"]:
+        own_ips, own_macs = self.own_addresses()
+        if not net or ip in self.hosts or ip in own_ips or (mac and mac.upper() in own_macs):
             return 0
         try:
             addr = ipaddress.ip_address(ip)
@@ -620,8 +623,9 @@ class ScanMixin:
         arp = {mac: ip for ip, mac in neighbour_macs(net["iface"]).items()}
         by_mac = {h["mac"]: h for h in self.hosts.values() if h["mac"]}
         added = 0
+        own_macs = self.own_addresses()[1]
         for mac, addrs in neighbours.items():
-            if mac == net["mac"]:
+            if mac.upper() in own_macs:  # this computer's own network cards (e.g. its Wi-Fi on the same network)
                 continue
             if mac in by_mac:
                 by_mac[mac]["ipv6"] = addrs
@@ -630,6 +634,10 @@ class ScanMixin:
             inside = v4 and ipaddress.ip_address(v4) in net["network"] and v4 not in self.hosts
             added += self.add_found_host(v4 if inside else addrs[0], mac, addrs)
         return added
+
+    def own_addresses(self):
+        """(IPv4 addresses, MAC addresses) of all this computer's network cards."""
+        return ({n["local_ip"] for n in self.networks}, {n["mac"].upper() for n in self.networks if n.get("mac")})
 
     def gateway(self):
         return self.current.get("gateway") if self.current else None

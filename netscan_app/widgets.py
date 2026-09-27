@@ -11,18 +11,19 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import (
-    QObject, QPointF, QProcess, QRectF, Qt, Signal,
+    QEvent, QObject, QPointF, QProcess, QRectF, Qt, Signal,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPen, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSystemTrayIcon,
+    QApplication, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QStyle, QStyledItemDelegate,
+    QSystemTrayIcon,
     QTableWidgetItem, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import theme as T
-from .devices import risky
+from .devices import DEVICE_TYPES as DEVICE_TYPE_NAMES, risky
 from .discovery import SSDP_ADDR, run_discovery
 from .names import lookup_name
 from .scanning import ip_sort_key
@@ -135,6 +136,42 @@ def nice_ceiling(value):
         return 1.0
     exp = 10 ** math.floor(math.log10(value))
     return next(m * exp for m in (1, 2, 5, 10) if m * exp >= value)
+
+
+class RowHover(QStyledItemDelegate):
+    """Highlights the whole row under the mouse (stylesheets can only highlight the one cell)."""
+
+    def __init__(self, view):
+        super().__init__(view)
+        self.view, self.row = view, -1
+        view.setMouseTracking(True)
+        view.viewport().installEventFilter(self)
+        view.setItemDelegate(self)
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind == QEvent.MouseMove:
+            row = self.view.rowAt(int(event.position().y()))
+            if row != self.row:
+                self.row = row
+                obj.update()
+        elif kind == QEvent.Leave and self.row != -1:
+            self.row = -1
+            obj.update()
+        return False
+
+    def paint(self, painter, option, index):
+        if index.row() == self.row and not option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, QColor(T.HOVER))
+        super().paint(painter, option, index)
+
+
+def short_ip(ip):
+    """fe80::1c7c:faff:fe19:6c55 -> fe80::…6c55; IPv4 unchanged."""
+    if ":" not in ip or len(ip) <= 20:
+        return ip
+    parts = ip.split(":")
+    return f"{parts[0]}::…{parts[-1]}"
 
 
 def fill_under(p, segments, color, bottom):
@@ -525,6 +562,8 @@ class NetworkMap(QWidget):
             if ip == "_net":
                 continue
             label = w.monitor_label(ip)
+            if label == ip and ":" in ip:  # IPv6-only and unnamed: say what it is, not its long address
+                label = DEVICE_TYPE_NAMES.get(k, "Device")
             p.setFont(small)
             fm = p.fontMetrics()
             p.setPen(QColor(T.TEXT))
@@ -533,7 +572,7 @@ class NetworkMap(QWidget):
             if label != ip:
                 p.setPen(QColor(T.MUTED))
                 p.drawText(QRectF(pt.x() - 70, pt.y() + r + 17, 140, 16), Qt.AlignHCenter | Qt.AlignTop,
-                           fm.elidedText(ip, Qt.ElideMiddle, 130))
+                           fm.elidedText(short_ip(ip), Qt.ElideMiddle, 130))
             self.nodes.append((ip, pt))
 
         # legend: what the rings and dot mean (never colour alone: the tooltip spells it out too)

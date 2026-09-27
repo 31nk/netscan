@@ -9,6 +9,7 @@ import urllib.request
 from PySide6.QtCore import (
     QSize, Qt,
 )
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QStackedWidget,
     QTextBrowser, QVBoxLayout, QWidget,
@@ -17,13 +18,18 @@ from PySide6.QtWidgets import (
 from . import theme as T
 from .discovery import cert_note
 from .scanning import valid_port_list
-from .theme import make_card
+from .theme import icon_path, make_card
 from .tools import (
     BLOCKED_ANSWERS, DNS_RCODES, DNS_TYPES, SECURITY_HEADERS, channel_advice, dns_tool,
     http_inspect, ip_info, mac_info, port_check, subnet_info, wifi_scan,
 )
 
 # How the Tools list is grouped, in order. Every tool panel must appear here exactly once.
+# An icon for each group heading (theme.icon_svgs names).
+GROUP_ICONS = {"Checkups": "pulse", "Client work": "briefcase", "Privacy & exposure": "shield", "DNS": "globe",
+               "Websites & domains": "link", "Network & Wi-Fi": "wifi", "Addresses & ports": "hash",
+               "This computer": "type-computer", "Over time": "clock"}
+
 TOOL_GROUPS = [
     ("Checkups", ["Slow internet?", "Security checkup", "Router check", "Gaming & calls"]),
     ("Client work", ["Client sites", "Site audit", "Firewall test", "VoIP readiness", "Domain check (bulk)",
@@ -113,6 +119,7 @@ class ToolsMixin:
         for group, names in TOOL_GROUPS:
             head = QListWidgetItem(group.upper())
             head.setFlags(Qt.NoItemFlags)  # a heading: not selectable, skipped by the arrow keys
+            head.setData(Qt.UserRole + 1, GROUP_ICONS.get(group, ""))
             font = head.font()
             font.setPointSizeF(font.pointSizeF() * 0.8)
             font.setBold(True)
@@ -125,6 +132,8 @@ class ToolsMixin:
                 item.setSizeHint(QSize(170, 32))  # room for the padding
                 self.tool_nav.addItem(item)
         assert not panels, f"tools missing from TOOL_GROUPS: {list(panels)}"
+        self.tool_nav.setIconSize(QSize(14, 14))
+        self.refresh_tool_icons()
         self.tool_nav.currentRowChanged.connect(self.tool_selected)
         self.tool_nav.setCurrentRow(next(r for r, name in self.tool_rows() if name == "DNS lookup"))
         card, cl, head = make_card("Tools")
@@ -139,6 +148,18 @@ class ToolsMixin:
         body.addWidget(self.tool_stack, 1)
         cl.addLayout(body, 1)
         return card
+
+    def refresh_tool_icons(self):
+        """Group headings' icons, drawn in the current theme's colours (called again on a theme change)."""
+        for r in range(self.tool_nav.count()):
+            item = self.tool_nav.item(r)
+            name = item.data(Qt.UserRole + 1)
+            if name:
+                pix = QIcon(icon_path(name)).pixmap(QSize(14, 14))
+                icon = QIcon()
+                for mode in (QIcon.Normal, QIcon.Disabled):  # headings are "disabled" items; keep full colour
+                    icon.addPixmap(pix, mode)
+                item.setIcon(icon)
 
     def tool_rows(self):
         """[(row, name)] of the tools in the list, leaving out the group headings."""

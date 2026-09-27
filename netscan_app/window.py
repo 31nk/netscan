@@ -47,7 +47,7 @@ from .toolkit_tab import ToolkitMixin
 from .palette import PaletteMixin
 from .uptime import UptimeMixin
 from .watch import WatchMixin
-from .widgets import Discovery, NetworkMap, Resolver, SsdpListener, StatusLabel
+from .widgets import Discovery, NetworkMap, Resolver, RowHover, SsdpListener, StatusLabel
 
 
 class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin, ToolkitMixin, InsightsMixin, OnlineMixin,
@@ -206,6 +206,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.count_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)  # never clip "13 host(s)"
 
         self.table = QTableWidget(0, len(COLUMNS))
+        RowHover(self.table)
         self.table.setHorizontalHeaderLabels([c.upper() for c in COLUMNS])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -252,6 +253,7 @@ class MainWindow(ScanMixin, DevicesMixin, MonitorMixin, UptimeMixin, ToolsMixin,
         self.details_label = QLabel("Select a host to see its open ports.")
         self.details_label.setObjectName("muted")
         self.details = QTableWidget(0, len(PORT_COLUMNS))
+        RowHover(self.details)
         self.details.setHorizontalHeaderLabels([c.upper() for c in PORT_COLUMNS])
         self.details.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.details.setSelectionBehavior(QAbstractItemView.SelectRows)

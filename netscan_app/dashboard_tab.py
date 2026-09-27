@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPushButton, QTe
 
 from . import history_db
 from . import theme as T
-from .columns import TAB_INTERNET, TAB_SCAN, TAB_TRAFFIC
+from .columns import TAB_DASHBOARD, TAB_INTERNET, TAB_SCAN, TAB_TRAFFIC
 from .devices import risky
 from .insights_tab import findings_html
 from .outages import LATENCY_KEY
@@ -140,9 +140,20 @@ class DashboardMixin:
     def dashboard_shown(self, visible):
         if visible:
             self.refresh_dashboard()
-            self.dash_timer.start(30_000)
+            self.dash_timer.start(10_000)
         else:
             self.dash_timer.stop()
+
+    def poke_dashboard(self):
+        """Something the Dashboard shows just changed: refresh it now if it's on screen (once, however many
+        results arrive together)."""
+        if self.tabbar.currentIndex() == TAB_DASHBOARD and not getattr(self, "_dash_poked", False):
+            self._dash_poked = True
+            QTimer.singleShot(0, self._dash_refresh_now)
+
+    def _dash_refresh_now(self):
+        self._dash_poked = False
+        self.refresh_dashboard()
 
     def refresh_dashboard(self):
         now = time.time()

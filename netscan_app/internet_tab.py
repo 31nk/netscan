@@ -74,6 +74,7 @@ class InternetMixin:
                                           ("dns", "DNS server"), ("dns_ms", "DNS lookup"),
                                           ("google", "Google DNS latency"), ("loss", "Packet loss"))):
             frame, value, detail = self.make_tile(label)
+            detail.setText("press Check now")
             grid.addWidget(frame, i // 4, i % 4)
             self.net_tiles[key] = (value, detail)
         cl.addLayout(grid)
@@ -134,6 +135,7 @@ class InternetMixin:
         self.speed_tiles = {}
         for key, label in (("down", "Download"), ("up", "Upload"), ("bloat", "Bufferbloat")):
             frame, value, detail = self.make_tile(label)
+            detail.setText("press Run speed test")
             row.addWidget(frame)
             self.speed_tiles[key] = (value, detail)
         sl.addLayout(row)
@@ -211,6 +213,7 @@ class InternetMixin:
     def speed_finished(self, res):
         """Show a finished speed test (from the button, the schedule or Slow internet?) and record it."""
         self.settings.setValue("last_speed_ts", time.time())
+        self.poke_dashboard()
         plan = self.speed_plan()
         for key in ("down", "up"):
             value, detail = self.speed_tiles[key]
@@ -240,6 +243,7 @@ class InternetMixin:
         self.net_check_btn.setEnabled(True)
         if not isinstance(res, Exception):
             self.last_internet = {**res, "ts": time.time()}  # for the Dashboard
+            self.poke_dashboard()
         if isinstance(res, Exception):
             self.net_when.setText(f"Check failed: {res}")
             return

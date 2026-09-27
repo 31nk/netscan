@@ -26,7 +26,7 @@ from .devices import DEVICE_TYPES, guess_type, label_risky, port_risk, risky
 from .scanning import parse_mac, port_label, valid_ssh_user
 from .system import now_iso, relative_time, terminal_argv, wake_on_lan
 from .theme import icon_path, make_card
-from .widgets import HistoryGrid, IPItem, SortItem
+from .widgets import HistoryGrid, IPItem, RowHover, SortItem
 
 
 class DevicesMixin:
@@ -96,6 +96,7 @@ class DevicesMixin:
         self.dev_show.currentIndexChanged.connect(self.filter_devices)
 
         self.dev_table = QTableWidget(0, len(DEV_COLUMNS))
+        RowHover(self.dev_table)
         self.dev_table.setHorizontalHeaderLabels([c.upper() for c in DEV_COLUMNS])
         self.dev_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.dev_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -457,7 +458,8 @@ class DevicesMixin:
             dot.setToolTip("Online (seen in the latest scan)" if online else "Not seen in the latest scan")
             t.setItem(row, DEV_STATUS, dot)
             kind, guessed = self.devices.device_type(d, gateway=gateway)
-            values = {DEV_NAME: d.get("nickname", ""), DEV_TYPE: DEVICE_TYPES[kind],
+            fallback = d.get("hostname") or d.get("friendly") or d.get("model") or ""
+            values = {DEV_NAME: d.get("nickname") or fallback, DEV_TYPE: DEVICE_TYPES[kind],
                       DEV_HOST: d.get("hostname", ""), DEV_MAC: d["mac"], DEV_VENDOR: d.get("vendor", "")}
             for col, text in values.items():
                 t.setItem(row, col, QTableWidgetItem(text))
@@ -478,7 +480,11 @@ class DevicesMixin:
             if bad:
                 t.item(row, DEV_NAME).setToolTip("Risky ports: " + ", ".join(port_label(p) for p in bad))
                 t.item(row, DEV_VENDOR).setData(Qt.UserRole + 1, True)
-            t.item(row, DEV_NAME).setFont(bold)
+            if d.get("nickname"):
+                t.item(row, DEV_NAME).setFont(bold)
+            else:
+                t.item(row, DEV_NAME).setForeground(QColor(T.MUTED))
+                t.item(row, DEV_NAME).setToolTip(t.item(row, DEV_NAME).toolTip() or "No nickname yet: double-click to name it")
             for col in (DEV_MAC, DEV_IP):
                 t.item(row, col).setFont(self.mono)
             if d["mac"] in keep:

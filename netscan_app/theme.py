@@ -53,6 +53,15 @@ def icon_svgs():
                              'stroke-linecap="round" stroke-linejoin="round"/>'),
         "chevron": _SVG.format(f'<path d="M4 6l4 4 4-4" {_LINE.format(c=MUTED).replace("1.4", "1.8")}/>'),
         "search": _SVG.format(f'<circle cx="7" cy="7" r="4.5" {line}/><path d="M10.5 10.5L14 14" {line}/>'),
+        # Tools group headings
+        "briefcase": _SVG.format(f'<rect x="1.8" y="4.8" width="12.4" height="8.7" rx="1.5" {line}/>'
+                                 f'<path d="M5.8 4.8V3.4a1 1 0 0 1 1-1h2.4a1 1 0 0 1 1 1v1.4M1.8 8.6h12.4" {line}/>'),
+        "link": _SVG.format(f'<path d="M6.8 9.2a2.9 2.9 0 0 0 4.1 0l2.2-2.2a2.9 2.9 0 0 0-4.1-4.1l-.9.9" {line}/>'
+                            f'<path d="M9.2 6.8a2.9 2.9 0 0 0-4.1 0L2.9 9a2.9 2.9 0 0 0 4.1 4.1l.9-.9" {line}/>'),
+        "wifi": _SVG.format(f'<path d="M1.6 6.2a9.2 9.2 0 0 1 12.8 0M3.9 8.7a5.9 5.9 0 0 1 8.2 0M6.2 11.1a2.6 2.6 0 0 1 '
+                            f'3.6 0" {line}/><circle cx="8" cy="13.2" r=".9" {dot}/>'),
+        "hash": _SVG.format(f'<path d="M6 2l-1.5 12M11.5 2L10 14M2.5 5.5h11.5M2 10.5h11.5" {line}/>'),
+        "clock": _SVG.format(f'<circle cx="8" cy="8" r="6.2" {line}/><path d="M8 4.6V8l2.4 1.5" {line}/>'),
         # Dashboard quick actions
         "globe": _SVG.format(f'<circle cx="8" cy="8" r="6.2" {line}/><path d="M1.8 8h12.4M8 1.8c2.2 2.4 2.2 9.9 0 '
                              f'12.4M8 1.8c-2.2 2.4-2.2 9.9 0 12.4" {line}/>'),
@@ -124,6 +133,8 @@ QPushButton#primary {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:
                        border: 1px solid {ACCENT}; color: #ffffff; font-weight: 600; padding: 7px 20px; }}
 QPushButton#primary:hover {{ background: {ACCENT_HI}; border-color: {ACCENT_HI}; }}
 QPushButton#action {{ text-align: left; padding: 9px 12px; }}
+QPushButton#chip {{ border-radius: 11px; padding: 3px 12px; min-height: 16px; color: {MUTED}; background: transparent; }}
+QPushButton#chip:hover {{ color: {TEXT}; border-color: {ACCENT}; background: {HOVER}; }}
 QPushButton#primary:pressed {{ background: {PRIMARY_PRESSED}; }}
 QPushButton#primary:disabled {{ background: {PRIMARY_OFF_BG}; border-color: {PRIMARY_OFF_BG};
                                 color: {PRIMARY_OFF_FG}; }}

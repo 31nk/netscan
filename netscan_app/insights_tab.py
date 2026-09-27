@@ -177,6 +177,7 @@ class InsightsMixin:
     def show_security(self, measured):
         res = security_checkup(self.security_context(measured))
         self.last_security = {**res, "when": time.time()}  # for the Dashboard
+        self.poke_dashboard()
         color = T.GREEN if res["score"] >= 75 else T.AMBER if res["score"] >= 50 else T.RED
         scanned = sum(1 for ip in self.hosts if ip in self.ports)
         if res["complete"]:

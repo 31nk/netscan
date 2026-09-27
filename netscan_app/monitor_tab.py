@@ -20,7 +20,7 @@ from . import theme as T
 from .columns import TAB_MONITOR
 from .internet import latency_stats
 from .theme import make_card
-from .widgets import LatencyChart, MONITOR_MAX, Pinger, SERIES_COLORS
+from .widgets import LatencyChart, MONITOR_MAX, Pinger, RowHover, SERIES_COLORS
 
 
 class MonitorMixin:
@@ -63,6 +63,19 @@ class MonitorMixin:
         row.addWidget(self.mon_span)
         row.addWidget(self.mon_pause)
         cl.addLayout(row)
+        quick = QHBoxLayout()
+        quick.setSpacing(6)
+        quick_label = QLabel("Quick add:")
+        quick_label.setObjectName("muted")
+        quick.addWidget(quick_label)
+        for label, target in (("Your router", None), ("Cloudflare 1.1.1.1", "1.1.1.1"), ("Google 8.8.8.8", "8.8.8.8"),
+                              ("Quad9 9.9.9.9", "9.9.9.9")):
+            chip = QPushButton(label)
+            chip.setObjectName("chip")
+            chip.clicked.connect(lambda _c=False, t=target, n=label: self.monitor_quick(t, n))
+            quick.addWidget(chip)
+        quick.addStretch(1)
+        cl.addLayout(quick)
         hint = QLabel("Pings each device and charts how long replies take. Spikes mean lag; × marks are "
                       "pings that got no reply (dropped packets). Up to 8 devices.")
         hint.setObjectName("muted")
@@ -74,6 +87,7 @@ class MonitorMixin:
         chl.addWidget(self.mon_chart, 1)
 
         self.mon_table = QTableWidget(0, 8)
+        RowHover(self.mon_table)
         self.mon_table.setHorizontalHeaderLabels(["", "DEVICE", "LAST", "AVERAGE", "MIN", "MAX", "JITTER", "LOSS"])
         self.mon_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.mon_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -128,6 +142,15 @@ class MonitorMixin:
         added = [ip for ip in ips if self.monitor_add(ip, self.monitor_label(ip))]
         if added:
             self.tabbar.setCurrentIndex(TAB_MONITOR)
+
+    def monitor_quick(self, target, label):
+        if target is None:  # the router of the network being scanned (or the main one)
+            target = (self.current or self.watch_target() or {}).get("gateway")
+            if not target:
+                self.status.setText("No router found on this network.")
+                return
+            label = self.monitor_label(target) if self.monitor_label(target) != target else "Router"
+        self.monitor_add(target, label)
 
     def monitor_typed(self):
         target = self.mon_add.text().strip()
